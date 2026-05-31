@@ -5,7 +5,7 @@ What if you could control *which pre-training data* a GPT was leaning on, at inf
 
 ![demo: dragging the slider from 0 to 1](assets/sh_vs_ts.gif)
 
-In the demo above, alpha=0 is [TinyStories](https://huggingface.co/datasets/roneneldan/TinyStories) ("Once upon a time...") and alpha=1 is [tinyshakespeare](https://github.com/karpathy/char-rnn/blob/master/data/tinyshakespeare/input.txt) ("KING HENRY VI: ..."). Everything in between is a continuous interpolation between the two. Same model, same weights. The slider just changes which neurons get to fire.
+In the demo above, alpha=0 is [TinyStories](https://huggingface.co/datasets/roneneldan/TinyStories) ("Once upon a time...") and alpha=1 is [tinyshakespeare](https://github.com/karpathy/char-rnn/blob/master/data/tinyshakespeare/input.txt) ("KING HENRY VI: ..."). Everything in between is a continuous interpolation between the two. The slider just changes which neurons get to fire.
 
 ## what's going on
 
@@ -15,7 +15,7 @@ abcGPT tries to add a formal knob which allows you to control the voice of your 
 
 ![mask histogram across all 9636 gated units](assets/mask_histogram.png)
 
-So we end up with roughly 20% of units sitting near 0 (these will be TinyStories specialists), another 20% sitting near 1 (Shakespeare specialists), and the rest scattered in the middle (call them halfsies). Each unit's `m` is its permanent specialty label, and it doesn't change during training. Now at inference time, the user passes in an alpha in [0, 1] and we gate every unit's activation by a smooth tent peaked at α = m:
+So we end up with some sitting near 0 (these will be TinyStories specialists), others sitting near 1 (Shakespeare specialists), and the rest scattered in the middle (call them halfsies). Each unit's `m` is its permanent specialty label, and it doesn't change during training. Now at inference time, the user passes in an alpha in [0, 1] and we gate every unit's activation by a smooth tent peaked at α = m:
 
 ```
 gate(α, m) = cos²(π/2 · |α - m| / max(m, 1-m))
@@ -27,7 +27,7 @@ And it works. After 10k iters on a T4, per-corpus held-out val loss tracks the s
 
 ![val loss across alpha, per corpus](assets/val_loss_vs_alpha.png)
 
-Shakespeare val loss is highest at α=0 and lowest near α=1. TinyStories val loss does exactly the mirror. One set of weights, around 10.7M params, trained on tinyshakespeare plus a 1.5MB slice of TinyStories. The slider really does just route which neurons get to talk.
+Shakespeare val loss is highest near α=0 and lowest near α=1. TinyStories val loss does exactly the mirror. The slider really does route which neurons get to talk.
 
 ## run it
 
