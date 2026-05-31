@@ -1,4 +1,46 @@
 
+# abcGPT
+
+What if you could control *which pre-training data* a GPT was leaning on, at inference time? abcGPT is an experimental fork of [Karpathy's nanoGPT](https://github.com/karpathy/nanoGPT) that adds a slider to the generator. You drag it from 0 to 1 and the model smoothly morphs from one training corpus to another, using a single set of weights.
+
+![demo: dragging the slider from 0 to 1](assets/sh_vs_ts.gif)
+
+In the demo above, alpha=0 is [TinyStories](https://huggingface.co/datasets/roneneldan/TinyStories) ("Once upon a time...") and alpha=1 is [tinyshakespeare](https://github.com/karpathy/char-rnn/blob/master/data/tinyshakespeare/input.txt) ("KING HENRY VI: ..."). Everything in between is a continuous interpolation between the two. Same model, same weights. The slider just changes which neurons get to fire.
+
+## what's going on
+
+Every major AI product smushes together all of the pre-training data sources into an irreversible tangle of neurons. When you prompt a model, you can kindof get different voices/styles out of the model, but you don't really have a rigorous way to control that. For example, if we train nanoGPT on Shakespeare + TinyStories, it ends up sounding like a blend of both, and while we can feel our way around by prompting things like "cicero:" or "the boy walked the dog" to try to coax the model into sounding like one or the other, there's no real way to keep it there.
+
+abcGPT tries to add a formal knob which allows you to control the voice of your GPT, and the way it works is by assigning each neuron to a corpus *before training even starts*, so that each neuron grows up specialized to one of the two. Specifically, for every gated unit in the network (residual stream channels, MLP inner units, attention heads), we sample a number `m ~ Beta(0.5, 0.5)` once at init and then freeze it. Beta(0.5, 0.5) is U-shaped on purpose, so most units land very near 0 or very near 1, with a thinner population in the middle:
+
+![mask histogram across all 9636 gated units](assets/mask_histogram.png)
+
+So we end up with roughly 20% of units sitting near 0 (these will be TinyStories specialists), another 20% sitting near 1 (Shakespeare specialists), and the rest scattered in the middle (call them halfsies). Each unit's `m` is its permanent specialty label, and it doesn't change during training. Now at inference time, the user passes in an alpha in [0, 1] and we gate every unit's activation by a smooth tent peaked at α = m:
+
+```
+gate(α, m) = cos²(π/2 · |α - m| / max(m, 1-m))
+```
+
+So at α=1, the m≈1 units fire full strength and the m≈0 units are completely off. At α=0, the opposite. The halfsies peak somewhere in the middle and hand off smoothly as you slide α around. During training, every iter we just sample a random α and then draw a batch corpus from Bernoulli(α), so high α gives us mostly Shakespeare batches. This joint (α, corpus) sampling is what does the gradient routing for us. Shakespeare specialists barely fire on TinyStories batches (those come with low α, which silences them), so they barely learn from the wrong corpus, and the same goes in reverse for TinyStories specialists. Specialists only sometimes fire on the wrong corpus, enough to help smooth out the interpolation between sources but not enough to get in the way of training.
+
+And it works. After 10k iters on a T4, per-corpus held-out val loss tracks the slider quite nicely:
+
+![val loss across alpha, per corpus](assets/val_loss_vs_alpha.png)
+
+Shakespeare val loss is highest at α=0 and lowest near α=1. TinyStories val loss does exactly the mirror. One set of weights, around 10.7M params, trained on tinyshakespeare plus a 1.5MB slice of TinyStories. The slider really does just route which neurons get to talk.
+
+## run it
+
+[![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/iamtrask/abcGPT/blob/main/notebooks/train_gated_tent_karpathy_sts.ipynb)
+
+The notebook is sized so that a single Colab T4 trains the model to the demo above in about 90 minutes. The final cell drops an ipywidgets slider in front of the trained model so you can drag it around in-browser and watch the output morph live.
+
+Companion to [attribution-based-control.ai](https://attribution-based-control.ai/).
+
+Everything below is upstream nanoGPT, kept verbatim so this repo also works as a regular nanoGPT.
+
+---
+
 # nanoGPT
 
 ![nanoGPT](assets/nanogpt.jpg)
