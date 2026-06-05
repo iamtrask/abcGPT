@@ -1,0 +1,18 @@
+Check 1 results: 2026-06-04T12:35:49+00:00
+instance: owt-check-1, machine type detected via metadata:
+projects/137890035049/machineTypes/n2-standard-32
+
+Dataset reference: Skylion007/openwebtext snapshot ref b4325f019c648b1641a1784748667e8b74e5e064
+
+train.bin     size=18071164978    run1=68a352b5dbd52e85...  run2=68a352b5dbd52e85...  PASS
+val.bin       size=8869212        run1=009ecdd6da34f1ae...  run2=009ecdd6da34f1ae...  PASS
+
+Versions:
+  tiktoken:        0.7.0
+  datasets:        2.21.0
+  huggingface_hub: 0.26.5
+  numpy:           1.26.4
+  python:          3.11.2
+
+CHECK 1: PASS — canonical OWT prep is byte-deterministic on this VM
+Next: Step 2 — build URL→cohort map from Gokaslan raw
