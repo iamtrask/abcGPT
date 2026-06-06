@@ -15,6 +15,7 @@ import json
 import os
 import pickle
 import re
+import shutil
 from pathlib import Path
 
 import numpy as np
@@ -104,6 +105,15 @@ def main():
 
     with open(result_dir / "meta.json", "w") as f:
         json.dump(meta, f, indent=2)
+
+    # 5. Persist the trained model alongside the metrics so anything that uploads
+    # `result_dir` (e.g., RunPod on_box.sh -> HF Hub) also captures the weights.
+    # Without this, training compute is wasted: the model dies with the container.
+    if ckpt_path.exists():
+        shutil.copy(ckpt_path, result_dir / "ckpt.pt")
+        print(f"{args.source_name}: copied ckpt.pt to {result_dir}")
+    else:
+        print(f"{args.source_name}: WARNING — no ckpt.pt at {ckpt_path}, model not saved")
 
     print(f"{args.source_name}: best_val_loss = {best_val:.4f}")
 
