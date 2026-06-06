@@ -96,25 +96,91 @@ def launch_pod(runpod_module, name: str, gpu_type: str, image: str, env: dict, d
     return pod["id"]
 
 
-def wait_for_pods(runpod_module, pod_ids: list[str], poll_interval: int = 60):
-    """Wait until all pods have exited (status != RUNNING). Print progress."""
-    pending = set(pod_ids)
-    print(f"\nMonitoring {len(pending)} pods (poll every {poll_interval}s)...")
-    while pending:
-        for pid in list(pending):
-            try:
-                pod = runpod_module.get_pod(pid)
-                status = pod.get("desiredStatus", "?")
-                runtime = pod.get("runtime", {})
-                if status != "RUNNING" or (runtime and runtime.get("uptimeInSeconds") and not runtime.get("ports")):
-                    pending.discard(pid)
-                    print(f"  pod {pid}: {status} (done)")
-            except Exception as exc:
-                print(f"  pod {pid}: query failed ({exc}); will retry")
-        if pending:
-            print(f"  {len(pending)} pods still running...")
+def monitor_and_terminate(
+    runpod_module,
+    pod_sources: dict,
+    hf_repo: str,
+    hf_token: str,
+    poll_interval: int = 30,
+    timeout: int = 7200,
+):
+    """Monitor HF Hub for each source's upload completion; terminate the
+    corresponding pod once all its sources are uploaded.
+
+    HF upload is the ACTUAL completion signal. RunPod's pod status API lies
+    (desiredStatus stays RUNNING even after the container exits, dockerId
+    can be None while work is happening or after it's done). Treating HF as
+    the source of truth is the only reliable strategy.
+
+    pod_sources: {pod_id: [source_name, ...]}  what each pod is supposed to produce
+    """
+    from huggingface_hub import HfApi, login
+
+    login(token=hf_token, add_to_git_credential=False)
+    api = HfApi()
+
+    remaining = {pid: list(srcs) for pid, srcs in pod_sources.items()}
+    total_sources = sum(len(srcs) for srcs in remaining.values())
+    start = time.time()
+    last_status_at = 0
+
+    print(f"\nMonitoring {len(remaining)} pods / {total_sources} sources via HF Hub...")
+    print(f"(poll every {poll_interval}s, timeout after {timeout/60:.0f} min)")
+
+    while remaining and time.time() - start < timeout:
+        # Query HF for current state
+        completed = set()
+        try:
+            for f in api.list_repo_tree(hf_repo, repo_type="model", recursive=True):
+                path = getattr(f, "path", None)
+                if path and "/" in path and path.endswith("/best_val_loss.txt"):
+                    completed.add(path.split("/")[0])
+        except Exception as exc:
+            print(f"  HF query failed: {exc}; will retry")
             time.sleep(poll_interval)
-    print("\nAll pods terminated.")
+            continue
+
+        # Check each pod against completed
+        terminated_this_round = []
+        for pod_id in list(remaining.keys()):
+            still_pending = [s for s in remaining[pod_id] if s not in completed]
+            newly_done = [s for s in remaining[pod_id] if s in completed]
+            for s in newly_done:
+                print(f"  ✓ {s} uploaded to HF")
+            if not still_pending:
+                # All sources for this pod done — terminate it
+                try:
+                    runpod_module.terminate_pod(pod_id)
+                    print(f"  ✓ pod {pod_id} terminated (all sources uploaded)")
+                    terminated_this_round.append(pod_id)
+                except Exception as exc:
+                    print(f"  ⚠ pod {pod_id}: terminate_pod failed ({exc}); will retry")
+            else:
+                remaining[pod_id] = still_pending
+
+        for pid in terminated_this_round:
+            del remaining[pid]
+
+        # Periodic status print (every 5 polls or so)
+        if remaining and time.time() - last_status_at > poll_interval * 5:
+            n_pending = sum(len(srcs) for srcs in remaining.values())
+            elapsed_min = (time.time() - start) / 60
+            print(f"  [{elapsed_min:.1f}min elapsed] {len(remaining)} pods, {n_pending} sources still pending")
+            last_status_at = time.time()
+
+        if remaining:
+            time.sleep(poll_interval)
+
+    if remaining:
+        n_pending = sum(len(srcs) for srcs in remaining.values())
+        print(f"\n⚠ Timeout ({timeout/60:.0f} min) reached. {len(remaining)} pods, {n_pending} sources still pending.")
+        print(f"⚠ Stuck pods will continue to bill until manually terminated. Run:")
+        for pid, srcs in remaining.items():
+            print(f"    python -c 'import runpod; runpod.api_key=\"$RUNPOD_API_KEY\"; runpod.terminate_pod(\"{pid}\")'")
+            print(f"      (pod {pid}, sources: {','.join(srcs)})")
+    else:
+        elapsed_min = (time.time() - start) / 60
+        print(f"\n✅ All pods terminated, all sources uploaded. Total monitor time: {elapsed_min:.1f} min")
 
 
 def main():
@@ -187,11 +253,12 @@ def main():
         runpod = None
         hf_token = os.environ.get("HF_TOKEN", "<dry-run-no-token>")
 
-    # Launch pods. Individual launch failures (e.g., RunPod out of capacity for
-    # this GPU type) are logged but don't kill the whole batch — the sources on
-    # failed boxes just stay missing locally, so re-running runpod-resume picks
-    # them up next time.
-    pod_ids = []
+    # Launch pods. Track pod_id -> [source_names] so we can later check HF Hub
+    # for each source's upload completion and terminate that pod precisely.
+    # Individual launch failures (e.g., RunPod out of capacity for this GPU type)
+    # are logged but don't kill the whole batch — the sources on failed boxes
+    # just stay missing locally, so re-running runpod-resume picks them up.
+    pod_sources = {}  # {pod_id: [source_name, ...]}
     failed_chunks = []
     for i, chunk in enumerate(chunks):
         sources_csv = ",".join(chunk)
@@ -206,7 +273,7 @@ def main():
         try:
             pid = launch_pod(runpod, name, args.gpu_type, args.image, env, args.dry_run)
             if pid:
-                pod_ids.append(pid)
+                pod_sources[pid] = chunk
                 print(f"  pod id: {pid}")
         except Exception as exc:
             print(f"  ⚠ launch failed: {exc}")
@@ -222,14 +289,17 @@ def main():
         print("\n--dry-run set; no pods launched.")
         return
 
-    print(f"\nLaunched {len(pod_ids)} pods.")
+    print(f"\nLaunched {len(pod_sources)} pods.")
     if args.no_wait:
-        print("(--no-wait set; exiting. Monitor at https://www.runpod.io/console/pods)")
+        print("(--no-wait set; exiting WITHOUT terminating pods after they finish.")
+        print(" These pods will need to be terminated manually at https://www.runpod.io/console/pods")
+        print(" or by re-running with monitoring enabled.)")
         return
 
-    wait_for_pods(runpod, pod_ids)
-    print("\nAll boxes done. Results should be on HF Hub.")
-    print(f"Pull with: huggingface-cli download {args.hf_repo} --local-dir results-from-hf")
+    monitor_and_terminate(runpod, pod_sources, args.hf_repo, hf_token)
+    print(f"\nAll boxes done. Results on HF: https://huggingface.co/{args.hf_repo}")
+    print(f"Pull locally with:")
+    print(f"  huggingface-cli download {args.hf_repo} --local-dir experiments/nano-1/results --repo-type model")
 
 
 if __name__ == "__main__":
