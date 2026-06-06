@@ -34,8 +34,8 @@
 #   data/100_simple_voices/baselines/out/<src>/{ckpt.pt, training.log}
 #
 # Outputs (committed):
-#   data/100_simple_voices/baselines/results/<src>/{val_loss_curve.csv, best_val_loss.txt, meta.json}
-#   data/100_simple_voices/baselines/results/summary.csv
+#   experiments/nano-1/results/<src>/{val_loss_curve.csv, best_val_loss.txt, meta.json}
+#   experiments/nano-1/results/summary.csv
 
 set -euo pipefail
 
@@ -47,6 +47,7 @@ echo "running from $REPO_ROOT"
 
 BASELINES_DIR="data/100_simple_voices/baselines"
 SOURCES_DIR="data/100_simple_voices/sources"
+RESULTS_DIR="experiments/nano-1/results"
 
 # Build the source list:
 #   - no args:    all 100 source_*.txt files in SOURCES_DIR
@@ -82,7 +83,7 @@ for i in "${!SOURCES[@]}"; do
     SOURCE_FILE="$SOURCES_DIR/source_${src}.txt"
     DATA_OUT="$BASELINES_DIR/data/$src"
     TRAIN_OUT="$BASELINES_DIR/out/$src"
-    RESULT_OUT="$BASELINES_DIR/results/$src"
+    RESULT_OUT="$RESULTS_DIR/$src"
 
     if [[ ! -f "$SOURCE_FILE" ]]; then
         echo "  WARNING: missing source file $SOURCE_FILE, skipping"
@@ -138,4 +139,4 @@ GRAND_END=$(date +%s)
 GRAND_S=$((GRAND_END - GRAND_START))
 echo
 echo "all baselines complete in $((GRAND_S / 60)) min."
-echo "summary: $BASELINES_DIR/results/summary.csv"
+echo "summary: $RESULTS_DIR/summary.csv"

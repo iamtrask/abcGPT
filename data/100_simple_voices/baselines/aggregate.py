@@ -11,7 +11,10 @@ import math
 from pathlib import Path
 
 
-RESULT_DIR = Path(__file__).parent / "results"
+# Results moved to experiments/nano-1/results/ for tier-centric organization.
+# aggregate.py is per-tier-agnostic but historically lived here; resolve up to
+# repo root and back down into the tier's results dir.
+RESULT_DIR = Path(__file__).resolve().parents[3] / "experiments/nano-1/results"
 
 FIELDS = [
     "source_name",
