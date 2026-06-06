@@ -194,6 +194,8 @@ def train_with_logging(
     migration_threshold=0.02,
     migration_warmup=500,
     ema_alpha=0.99,
+    migration_step_decay=False,
+    migration_boundary_cap=0.5,
 ):
     """Same logic as gated_gpt_tent.train_gated, but writes a structured JSONL log.
 
@@ -410,11 +412,28 @@ def train_with_logging(
                and loss_ema_shake is not None and loss_ema_ts is not None:
                 delta = loss_ema_shake - loss_ema_ts
                 if abs(delta) > migration_threshold:
-                    # delta > 0 → shake harder → boundary DOWN (more neurons above boundary → more shake-spec)
-                    # delta < 0 → ts harder → boundary UP (opposite)
+                    # Effective step: linearly decay from migration_step → 0 if --migration-step-decay
+                    if migration_step_decay:
+                        progress = (it + 1) / n_iters  # 0 → 1
+                        cur_step = migration_step * max(0.0, 1.0 - progress)
+                    else:
+                        cur_step = migration_step
+                    # Direction: shake harder → boundary DOWN, ts harder → boundary UP
                     shift_sign = -1.0 if delta > 0 else +1.0
-                    model.shift_all_boundaries(shift_sign * migration_step)
-                    n_migrations += 1
+                    proposed_shift = shift_sign * cur_step
+                    # Cap check: don't move past abs(boundary - 0.5) > migration_boundary_cap
+                    cur_boundary = float(model.M_embd_boundary.item())
+                    new_boundary = cur_boundary + proposed_shift
+                    if abs(new_boundary - 0.5) > migration_boundary_cap:
+                        # Clip to the cap rather than reject entirely
+                        if new_boundary > 0.5:
+                            new_boundary = 0.5 + migration_boundary_cap
+                        else:
+                            new_boundary = 0.5 - migration_boundary_cap
+                        proposed_shift = new_boundary - cur_boundary
+                    if abs(proposed_shift) > 1e-7:
+                        model.shift_all_boundaries(proposed_shift)
+                        n_migrations += 1
 
         if (it + 1) % log_interval == 0:
             dt = time.time() - t_log
@@ -550,6 +569,12 @@ def main():
                    help='(boundary-migration) skip migration for the first N iters (let weights settle)')
     p.add_argument('--ema-alpha', type=float, default=0.99,
                    help='(boundary-migration) exponential moving average factor for per-cohort loss tracking')
+    # Damping knobs added after the first boundary-migration run overshot
+    # (boundary went from 0.5 → 0.065, TS collapsed). These stop runaway migration.
+    p.add_argument('--migration-step-decay', action='store_true',
+                   help='(boundary-migration) linearly decay migration step from --migration-step to 0 over n_iters')
+    p.add_argument('--migration-boundary-cap', type=float, default=0.5,
+                   help='(boundary-migration) max |boundary - 0.5| allowed (default 0.5 = no cap). e.g. 0.15 = boundary stays in [0.35, 0.65]')
     # Device + smoke
     p.add_argument('--device', default='cuda' if torch.cuda.is_available() else 'cpu')
     p.add_argument('--amp-dtype', default='bfloat16', choices=['bfloat16', 'float16', 'float32'])
@@ -648,6 +673,8 @@ def main():
         migration_threshold=args.migration_threshold,
         migration_warmup=args.migration_warmup,
         ema_alpha=args.ema_alpha,
+        migration_step_decay=args.migration_step_decay,
+        migration_boundary_cap=args.migration_boundary_cap,
     )
 
     # Save final summary + final m_n snapshot if applicable
