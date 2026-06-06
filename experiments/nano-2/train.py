@@ -580,6 +580,11 @@ def main():
                         'Use 0.5 for the default (no shift). Use e.g. 0.35 to start with the '
                         'post-migration allocation baked in (phase-2 retrain protocol). '
                         'Combine with --migration-step 0 to freeze the boundary for the whole run.')
+    p.add_argument('--rank-beta-alpha', type=float, default=0.5,
+                   help='(boundary-migration) Beta(α, α) shape parameter for the rank/mask sampling. '
+                        '0.5 = U-shaped (default, most neurons hard-specialized), '
+                        '1.0 = uniform, 2.0 = bell-shaped (most neurons mixed). '
+                        'Used by the perturbation sweep to probe how mask distribution shape affects loss.')
     # Device + smoke
     p.add_argument('--device', default='cuda' if torch.cuda.is_available() else 'cpu')
     p.add_argument('--amp-dtype', default='bfloat16', choices=['bfloat16', 'float16', 'float32'])
@@ -646,6 +651,7 @@ def main():
             trainable_masks=(args.variant == 'trainable-mn'),
             boundary_mode=(args.variant == 'boundary-migration'),
             boundary_sharpness=args.boundary_sharpness,
+            rank_beta_alpha=args.rank_beta_alpha,
         )
         model = GatedGPT(cfg).to(args.device)
         ungated = False

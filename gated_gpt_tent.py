@@ -60,17 +60,30 @@ import torch.nn.functional as F
 # Mask sampling — Beta(0.5, 0.5) via inverse CDF (sin^2(pi*u/2))
 # ============================================================================
 
-def sample_beta_half_mask(shape, seed):
-    """Sample a Beta(0.5, 0.5)-distributed tensor of the given shape.
+def sample_beta_half_mask(shape, seed, alpha=0.5):
+    """Sample a symmetric Beta(α, α)-distributed tensor of the given shape.
 
-    Beta(0.5, 0.5) is the arcsine distribution: f(x) = 1/(pi*sqrt(x(1-x))),
-    most mass near x=0 and x=1, with a U-shaped density. We sample by inverse
-    CDF transform: if U ~ Uniform[0,1] then sin^2(pi*U/2) ~ Beta(0.5, 0.5).
+    For α=0.5 (default): the arcsine distribution, U-shaped, sampled via the
+    closed-form inverse CDF sin²(πU/2). Preserves the exact seed→sample map
+    used by every nano-2 run prior to the perturbation sweep.
+
+    For α≠0.5: symmetric Beta sampled via the ratio of two i.i.d. Gamma(α)
+    samples. Uses the global RNG (save+restore) since torch's Beta dist
+    sampler doesn't accept a per-call generator.
     """
-    g = torch.Generator()
-    g.manual_seed(seed)
-    u = torch.rand(shape, generator=g)
-    return torch.sin(math.pi / 2 * u) ** 2
+    if alpha == 0.5:
+        g = torch.Generator()
+        g.manual_seed(seed)
+        u = torch.rand(shape, generator=g)
+        return torch.sin(math.pi / 2 * u) ** 2
+    saved = torch.random.get_rng_state()
+    try:
+        torch.manual_seed(seed)
+        a = torch.tensor(float(alpha))
+        samples = torch.distributions.Beta(a, a).sample(shape if isinstance(shape, tuple) else (shape,))
+    finally:
+        torch.random.set_rng_state(saved)
+    return samples
 
 
 # ============================================================================
@@ -173,6 +186,8 @@ class GatedGPTConfig:
                                    # preserved (same rank forever). This is the consistency-preserving version
                                    # of trainable_masks — same neurons cross the boundary in either direction.
     boundary_sharpness: float = 10.0  # sharpness of sigmoid transition. higher = sharper specialist/halfsie split.
+    rank_beta_alpha: float = 0.5      # symmetric Beta(α, α) shape parameter for rank/mask sampling.
+                                      # 0.5 = U-shape (default), 1.0 = uniform, 2.0 = bell.
 
 
 def _beta_to_logit(m, eps=1e-4):
@@ -202,7 +217,7 @@ class GatedSelfAttention(nn.Module):
         self.trainable_masks = config.trainable_masks
         self.boundary_mode = config.boundary_mode
         self.boundary_sharpness = config.boundary_sharpness
-        head_init = sample_beta_half_mask((config.n_head,), seed=config.mask_seed + 100 * layer_idx + 1)
+        head_init = sample_beta_half_mask((config.n_head,), seed=config.mask_seed + 100 * layer_idx + 1, alpha=config.rank_beta_alpha)
         if config.boundary_mode:
             # Each block's head mask has its own rank vector and its own boundary scalar.
             # Boundaries can be tied across layers from the outside (see GatedGPT.__init__).
@@ -261,7 +276,7 @@ class GatedMLP(nn.Module):
         self.trainable_masks = config.trainable_masks
         self.boundary_mode = config.boundary_mode
         self.boundary_sharpness = config.boundary_sharpness
-        inner_init = sample_beta_half_mask((4 * config.n_embd,), seed=config.mask_seed + 100 * layer_idx + 2)
+        inner_init = sample_beta_half_mask((4 * config.n_embd,), seed=config.mask_seed + 100 * layer_idx + 2, alpha=config.rank_beta_alpha)
         if config.boundary_mode:
             self.register_buffer('M_inner_ranks', inner_init)
             self.register_buffer('M_inner_boundary', torch.tensor(0.5))
@@ -324,7 +339,7 @@ class GatedGPT(nn.Module):
         # Sampled once with a layer-independent seed so re-runs reproduce it.
         # Shared across every module that touches the residual stream
         # (embeddings, every block's c_proj output, and ln_f output before lm_head).
-        M_embd_init = sample_beta_half_mask((config.n_embd,), seed=config.mask_seed)
+        M_embd_init = sample_beta_half_mask((config.n_embd,), seed=config.mask_seed, alpha=config.rank_beta_alpha)
         shared_boundary = None
         if config.boundary_mode:
             self.register_buffer('M_embd_ranks', M_embd_init)

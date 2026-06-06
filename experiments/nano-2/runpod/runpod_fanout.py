@@ -118,6 +118,42 @@ SWEEP_DEFAULT = [
     ("phase2-boundary-0.30",
      "--variant boundary-migration --n-iters 10000 --span 1.0 --seed 1337 --eval-interval 500 --log-interval 250 --initial-boundary 0.2954 --migration-step 0 --migration-warmup 999999"),
 
+    # PERTURBATION SWEEP: single-dimension probes around a known base.
+    # `pert-base` is the unperturbed reference (boundary_mode defaults). Each
+    # perturbation variant differs from `pert-base` in EXACTLY ONE knob,
+    # with a small step in one direction. Loss delta vs pert-base is the
+    # numerical gradient along that axis. Two directions per axis where
+    # meaningful (e.g. boundary up AND down) to detect curvature.
+    #
+    # Compare to:  fixed-mn-replicate-seeded (sum=2.307, alt baseline)
+    #              ungated-10k (sum=2.244, ceiling)
+    ("pert-base",
+     "--variant boundary-migration --n-iters 10000 --span 1.0 --seed 1337 --eval-interval 500 --log-interval 250 --initial-boundary 0.5 --migration-step 0 --migration-warmup 999999 --boundary-sharpness 10 --rank-beta-alpha 0.5"),
+
+    ("pert-narrow-loose",
+     "--variant boundary-migration --n-iters 10000 --span 2.0 --seed 1337 --eval-interval 500 --log-interval 250 --initial-boundary 0.5 --migration-step 0 --migration-warmup 999999 --boundary-sharpness 10 --rank-beta-alpha 0.5"),
+
+    ("pert-narrow-tight",
+     "--variant boundary-migration --n-iters 10000 --span 0.5 --seed 1337 --eval-interval 500 --log-interval 250 --initial-boundary 0.5 --migration-step 0 --migration-warmup 999999 --boundary-sharpness 10 --rank-beta-alpha 0.5"),
+
+    ("pert-sharp-soft",
+     "--variant boundary-migration --n-iters 10000 --span 1.0 --seed 1337 --eval-interval 500 --log-interval 250 --initial-boundary 0.5 --migration-step 0 --migration-warmup 999999 --boundary-sharpness 3 --rank-beta-alpha 0.5"),
+
+    ("pert-sharp-hard",
+     "--variant boundary-migration --n-iters 10000 --span 1.0 --seed 1337 --eval-interval 500 --log-interval 250 --initial-boundary 0.5 --migration-step 0 --migration-warmup 999999 --boundary-sharpness 30 --rank-beta-alpha 0.5"),
+
+    ("pert-bdry-shake",
+     "--variant boundary-migration --n-iters 10000 --span 1.0 --seed 1337 --eval-interval 500 --log-interval 250 --initial-boundary 0.42 --migration-step 0 --migration-warmup 999999 --boundary-sharpness 10 --rank-beta-alpha 0.5"),
+
+    ("pert-bdry-ts",
+     "--variant boundary-migration --n-iters 10000 --span 1.0 --seed 1337 --eval-interval 500 --log-interval 250 --initial-boundary 0.58 --migration-step 0 --migration-warmup 999999 --boundary-sharpness 10 --rank-beta-alpha 0.5"),
+
+    ("pert-beta-uniform",
+     "--variant boundary-migration --n-iters 10000 --span 1.0 --seed 1337 --eval-interval 500 --log-interval 250 --initial-boundary 0.5 --migration-step 0 --migration-warmup 999999 --boundary-sharpness 10 --rank-beta-alpha 1.0"),
+
+    ("pert-beta-bell",
+     "--variant boundary-migration --n-iters 10000 --span 1.0 --seed 1337 --eval-interval 500 --log-interval 250 --initial-boundary 0.5 --migration-step 0 --migration-warmup 999999 --boundary-sharpness 10 --rank-beta-alpha 2.0"),
+
     ("fixed-mn-span0.3",
      "--variant fixed-mn --n-iters 10000 --span 0.3 --alpha-dist beta_half"),
 
