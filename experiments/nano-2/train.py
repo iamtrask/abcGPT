@@ -447,9 +447,12 @@ def main():
     p.add_argument('--weight-decay', type=float, default=0.1)
     p.add_argument('--grad-clip', type=float, default=1.0)
     p.add_argument('--alpha-dist', default='beta_half', choices=['beta_half', 'uniform', 'bimodal_endpoints'])
-    p.add_argument('--log-interval', type=int, default=100)
-    p.add_argument('--eval-interval', type=int, default=250)
+    # Match the notebook defaults exactly: log every 250 iters, eval every 500.
+    p.add_argument('--log-interval', type=int, default=250)
+    p.add_argument('--eval-interval', type=int, default=500)
     p.add_argument('--eval-iters', type=int, default=200)
+    p.add_argument('--seed', type=int, default=1337,
+                   help='torch.manual_seed value, set before model init. Default 1337 matches the original nano-2 notebook.')
     # Trainable-m_n params (stubs for step 2)
     p.add_argument('--mask-lr-ratio', type=float, default=1e-2,
                    help='(trainable-mn only) m_n LR = lr * mask_lr_ratio. 1e-2 = "moderate"')
@@ -483,10 +486,17 @@ def main():
     if not data_dir.exists():
         sys.exit(f"error: data dir missing: {data_dir}")
 
+    # Seed the global RNG to match the original notebook's reproducibility.
+    # The notebook calls torch.manual_seed(1337) before model init; this affects
+    # weight init AND every torch.rand/randint call during training (alpha
+    # sampling, batch index sampling, etc.). Without this, our runs diverge
+    # from the notebook by ~0.10-0.15 nats just from seed variance.
+    torch.manual_seed(args.seed)
+
     out_dir = Path(args.results_root) / args.variant_name
     out_dir.mkdir(parents=True, exist_ok=True)
     log_path = out_dir / 'log.jsonl'
-    print(f"variant: {args.variant}  | name: {args.variant_name}  | log: {log_path}")
+    print(f"variant: {args.variant}  | name: {args.variant_name}  | log: {log_path}  | seed: {args.seed}")
 
     amp_dtype = {'bfloat16': torch.bfloat16, 'float16': torch.float16, 'float32': torch.float32}[args.amp_dtype]
 
