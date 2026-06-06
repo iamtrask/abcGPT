@@ -29,7 +29,13 @@ import time
 from pathlib import Path
 
 
-DEFAULT_GPU_TYPE = "NVIDIA GeForce RTX 4090"
+# Default to RTX 3090 spot for small-tier work — our 10.7M model uses ~12% of
+# a 4090's VRAM, so we were paying ~3× too much. 3090 spot has more capacity
+# in the COMMUNITY pool, similar architecture to 4090 (~70% the per-iter
+# throughput), and accepts our resource spec consistently. Override via
+# --gpu-type / --cloud-type if you want to spend up for speed (4090 SECURE).
+DEFAULT_GPU_TYPE = "NVIDIA GeForce RTX 3090"
+DEFAULT_CLOUD_TYPE = "COMMUNITY"
 DEFAULT_IMAGE = "runpod/pytorch:2.4.0-py3.11-cuda12.4.1-devel-ubuntu22.04"
 DEFAULT_HF_REPO = "iamtrask/abcGPT-nano-2"
 
@@ -84,16 +90,16 @@ SWEEP_DEFAULT = [
 ]
 
 
-def launch_pod(runpod_module, name, gpu_type, image, env, dry_run):
+def launch_pod(runpod_module, name, gpu_type, cloud_type, image, env, dry_run):
     """Create a single RunPod pod for one variant."""
     if dry_run:
-        print(f"  [DRY-RUN] would create pod '{name}' on {gpu_type}")
+        print(f"  [DRY-RUN] would create pod '{name}' on {gpu_type} ({cloud_type})")
         return None
     pod = runpod_module.create_pod(
         name=name,
         image_name=image,
         gpu_type_id=gpu_type,
-        cloud_type="SECURE",  # nano-1 sweep confirmed SECURE has capacity when COMMUNITY doesn't.
+        cloud_type=cloud_type,
         gpu_count=1,
         volume_in_gb=0,
         container_disk_in_gb=20,
@@ -107,6 +113,7 @@ def run_until_done(
     runpod_module,
     pending_queue,
     gpu_type,
+    cloud_type,
     image,
     hf_token,
     hf_repo,
@@ -140,7 +147,7 @@ def run_until_done(
             "GIT_SHA": git_sha,
         }
         try:
-            return launch_pod(runpod_module, f"nano-2-{variant_name[:30]}", gpu_type, image, env, dry_run=False)
+            return launch_pod(runpod_module, f"nano-2-{variant_name[:30]}", gpu_type, cloud_type, image, env, dry_run=False)
         except Exception:
             return None
 
@@ -148,17 +155,28 @@ def run_until_done(
     print(f"(poll every {poll_interval}s, timeout {timeout/60:.0f} min, max {max_retries_per_chunk} retries per variant)")
 
     while (pending_queue or tracked) and time.time() - start < timeout:
-        # 1. Poll HF for completed variants — each variant uploads a log.jsonl
+        # 1. Poll HF for completed variants. The "done" marker is summary.json
+        # (only written at training end). log.jsonl is also uploaded mid-training
+        # for live visibility, so we DON'T use it as the completion signal —
+        # that would trigger premature pod termination.
+        # A 404 here means the repo doesn't exist yet (we haven't uploaded
+        # anything to it). Treat that as "no completions yet" and KEEP GOING
+        # so the launch step below can fire.
         completed = set()
         try:
             for f in api.list_repo_tree(hf_repo, repo_type="model", recursive=True):
                 path = getattr(f, "path", None)
-                if path and "/" in path and path.endswith("/log.jsonl"):
+                if path and "/" in path and path.endswith("/summary.json"):
                     completed.add(path.split("/")[0])
         except Exception as exc:
-            print(f"  HF query failed: {exc}; will retry")
-            time.sleep(poll_interval)
-            continue
+            msg = str(exc)
+            if "404" in msg or "RepositoryNotFoundError" in msg or "not found" in msg.lower():
+                # repo doesn't exist yet — first upload will create it
+                pass
+            else:
+                print(f"  HF query failed transiently: {exc}; will retry")
+                time.sleep(poll_interval)
+                continue
 
         # 2. Terminate pods whose variant has uploaded
         for pid in list(tracked.keys()):
@@ -214,7 +232,12 @@ def run_until_done(
 def main():
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--only", default="", help="Comma-separated variant names to run (default: full sweep)")
-    p.add_argument("--gpu-type", default=DEFAULT_GPU_TYPE)
+    p.add_argument("--gpu-type", default=DEFAULT_GPU_TYPE,
+                   help=f"RunPod GPU type ID (default: '{DEFAULT_GPU_TYPE}'). "
+                        "For bigger models try 'NVIDIA GeForce RTX 4090' or 'NVIDIA RTX A6000'.")
+    p.add_argument("--cloud-type", default=DEFAULT_CLOUD_TYPE, choices=["COMMUNITY", "SECURE"],
+                   help=f"COMMUNITY = spot (cheaper, ~5-10%% preempt risk); SECURE = on-demand "
+                        f"(default: {DEFAULT_CLOUD_TYPE}).")
     p.add_argument("--image", default=DEFAULT_IMAGE)
     p.add_argument("--hf-repo", default=DEFAULT_HF_REPO)
     p.add_argument("--git-sha", default="main")
@@ -232,14 +255,22 @@ def main():
     print(f"  Variants: {len(sweep)}")
     for n, a in sweep:
         print(f"    {n:<32} {a}")
-    print(f"  GPU: {args.gpu_type}")
+    print(f"  GPU: {args.gpu_type}  ({args.cloud_type})")
     print(f"  HF repo: {args.hf_repo}")
     print(f"  Git SHA: {args.git_sha}")
 
-    # Cost estimate: each variant ~3-13 min training on 4090 + 5-10 min boot/setup
-    per_pod_hr = 0.4  # 0.5 hr per variant total wall-clock cap (training + setup)
-    cost_per_hr = 0.69
-    print(f"  Est cost per variant: ~${per_pod_hr * cost_per_hr:.2f}")
+    # Cost estimate uses rough per-hr rates by (GPU, cloud) — used for display only.
+    per_pod_hr = 0.4  # ~0.4 hr per variant total wall-clock (training + setup)
+    rate_table = {
+        ("NVIDIA GeForce RTX 4090", "SECURE"):    0.69,
+        ("NVIDIA GeForce RTX 4090", "COMMUNITY"): 0.34,
+        ("NVIDIA GeForce RTX 3090", "SECURE"):    0.44,
+        ("NVIDIA GeForce RTX 3090", "COMMUNITY"): 0.22,
+        ("NVIDIA RTX A5000", "SECURE"):           0.40,
+        ("NVIDIA RTX A5000", "COMMUNITY"):        0.20,
+    }
+    cost_per_hr = rate_table.get((args.gpu_type, args.cloud_type), 0.50)  # fallback
+    print(f"  Est rate: ${cost_per_hr}/hr  (est per variant: ~${per_pod_hr * cost_per_hr:.2f})")
     print(f"  Est total cost: ~${len(sweep) * per_pod_hr * cost_per_hr:.2f}")
     print(f"  Wall-clock: ~30-40 min (bounded by slowest cold-start pod)")
     print()
@@ -267,7 +298,7 @@ def main():
     pending = [(i, item) for i, item in enumerate(sweep)]
     run_until_done(
         runpod, pending,
-        gpu_type=args.gpu_type, image=args.image,
+        gpu_type=args.gpu_type, cloud_type=args.cloud_type, image=args.image,
         hf_token=hf_token, hf_repo=args.hf_repo,
         git_sha=args.git_sha,
     )

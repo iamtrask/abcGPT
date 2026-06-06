@@ -73,7 +73,48 @@ else
 fi
 
 # ------------------------------------------------------------------
-# 5. Train
+# 5. Start background log-pusher BEFORE training begins.
+#
+# Pushes ONLY log.jsonl to HF every 60s while training runs, so the
+# orchestrator (and a human) can see live training progress. Pushes only
+# the single log file — never summary.json, which the orchestrator uses
+# as the "training done" marker (uploaded only by the final step below).
+# ------------------------------------------------------------------
+LOG_PATH="$REPO_DIR/experiments/nano-2/results/$VARIANT_NAME/log.jsonl"
+mkdir -p "$REPO_DIR/experiments/nano-2/results/$VARIANT_NAME"
+
+echo "--- start background log-pusher (60s interval) ---"
+(
+  # Wait a beat so the path actually exists when we start polling.
+  sleep 5
+  while true; do
+    sleep 55
+    if [[ -f "$LOG_PATH" ]]; then
+      python3 - <<PYEOF 2>/dev/null || true
+import os
+from huggingface_hub import HfApi, login, create_repo
+try:
+    login(token=os.environ["HF_TOKEN"], add_to_git_credential=False)
+    create_repo("$HF_REPO", repo_type="model", exist_ok=True, private=False)
+    api = HfApi()
+    api.upload_file(
+        path_or_fileobj="$LOG_PATH",
+        path_in_repo="$VARIANT_NAME/log.jsonl",
+        repo_id="$HF_REPO", repo_type="model",
+        commit_message="live: $VARIANT_NAME training in progress",
+    )
+except Exception as e:
+    # quietly swallow upload errors; final upload will sync the truth
+    pass
+PYEOF
+    fi
+  done
+) &
+UPLOADER_PID=$!
+echo "background uploader PID: $UPLOADER_PID"
+
+# ------------------------------------------------------------------
+# 6. Train (foreground)
 # ------------------------------------------------------------------
 echo "--- train: variant=$VARIANT_NAME ---"
 cd "$REPO_DIR"
@@ -84,9 +125,17 @@ python3 experiments/nano-2/train.py \
     --device cuda
 
 # ------------------------------------------------------------------
-# 6. Upload variant's results to HF Hub
+# 7. Stop the background uploader cleanly before the final upload.
 # ------------------------------------------------------------------
-echo "--- upload to HF ---"
+echo "--- stop background uploader ---"
+kill "$UPLOADER_PID" 2>/dev/null || true
+wait "$UPLOADER_PID" 2>/dev/null || true
+
+# ------------------------------------------------------------------
+# 8. Final upload (whole folder including summary.json — the marker the
+#    orchestrator uses to know training is done and the pod can be killed).
+# ------------------------------------------------------------------
+echo "--- final upload to HF (includes summary.json done-marker) ---"
 python3 - <<PYEOF
 import os, sys
 from huggingface_hub import HfApi, login, create_repo
@@ -104,7 +153,7 @@ api.upload_folder(
     path_in_repo="$VARIANT_NAME",
     repo_id="$HF_REPO",
     repo_type="model",
-    commit_message=f"nano-2: add results for variant '$VARIANT_NAME'",
+    commit_message=f"nano-2: final results for variant '$VARIANT_NAME'",
 )
 print(f"uploaded {variant_dir} -> {('$HF_REPO')}/$VARIANT_NAME")
 PYEOF
