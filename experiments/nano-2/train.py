@@ -575,6 +575,11 @@ def main():
                    help='(boundary-migration) linearly decay migration step from --migration-step to 0 over n_iters')
     p.add_argument('--migration-boundary-cap', type=float, default=0.5,
                    help='(boundary-migration) max |boundary - 0.5| allowed (default 0.5 = no cap). e.g. 0.15 = boundary stays in [0.35, 0.65]')
+    p.add_argument('--initial-boundary', type=float, default=0.5,
+                   help='(boundary-migration) starting value for the boundary scalar. '
+                        'Use 0.5 for the default (no shift). Use e.g. 0.35 to start with the '
+                        'post-migration allocation baked in (phase-2 retrain protocol). '
+                        'Combine with --migration-step 0 to freeze the boundary for the whole run.')
     # Device + smoke
     p.add_argument('--device', default='cuda' if torch.cuda.is_available() else 'cpu')
     p.add_argument('--amp-dtype', default='bfloat16', choices=['bfloat16', 'float16', 'float32'])
@@ -644,6 +649,14 @@ def main():
         )
         model = GatedGPT(cfg).to(args.device)
         ungated = False
+
+        if args.variant == 'boundary-migration' and abs(args.initial_boundary - 0.5) > 1e-7:
+            # Phase-2 protocol: bake a post-migration boundary into iter-0 init,
+            # so the model trains from scratch with the target allocation already
+            # in place. No unlearn-then-relearn transient.
+            delta = args.initial_boundary - 0.5
+            model.shift_all_boundaries(delta)
+            print(f"  initial boundary set to {args.initial_boundary:.4f} (shifted by {delta:+.4f})")
 
     n_params = sum(p.numel() for p in model.parameters())
     print(f"model: {n_params/1e6:.2f}M params  ({args.variant})")

@@ -51,6 +51,73 @@ SWEEP_DEFAULT = [
     ("fixed-mn-replicate",
      "--variant fixed-mn --n-iters 10000 --span 1.0 --alpha-dist beta_half"),
 
+    # Same config as fixed-mn-replicate but with the explicit seed + matching
+    # notebook intervals. If this lands at shake≈1.20, ts≈0.86, the 0.18-nat
+    # gap was purely RNG drift, not a code bug.
+    ("fixed-mn-replicate-seeded",
+     "--variant fixed-mn --n-iters 10000 --span 1.0 --alpha-dist beta_half --seed 1337 --eval-interval 500 --log-interval 250"),
+
+    # --- aggressive trainable-mn variants -------------------------------
+    # Last sweep's "trainable-mn" variants barely moved m_n (drift_L2 ≤ 0.025)
+    # because mask_lr_ratio was 100× smaller than weight LR. These four crank
+    # it up to actually test whether the model CAN learn to allocate capacity.
+    ("trainable-mn-medium",
+     "--variant trainable-mn --n-iters 10000 --span 1.0 --alpha-dist beta_half --seed 1337 --eval-interval 500 --log-interval 250 --mask-lr-ratio 0.1 --lambda-var 0 --warmup-mn 0"),
+
+    ("trainable-mn-aggressive",
+     "--variant trainable-mn --n-iters 10000 --span 1.0 --alpha-dist beta_half --seed 1337 --eval-interval 500 --log-interval 250 --mask-lr-ratio 1.0 --lambda-var 0 --warmup-mn 0"),
+
+    ("trainable-mn-aggressive-warmup",
+     "--variant trainable-mn --n-iters 10000 --span 1.0 --alpha-dist beta_half --seed 1337 --eval-interval 500 --log-interval 250 --mask-lr-ratio 1.0 --lambda-var 0 --warmup-mn 1000"),
+
+    ("trainable-mn-aggressive-varreg",
+     "--variant trainable-mn --n-iters 10000 --span 1.0 --alpha-dist beta_half --seed 1337 --eval-interval 500 --log-interval 250 --mask-lr-ratio 1.0 --lambda-var 0.1 --warmup-mn 0"),
+
+    # balance-penalty: dual-batch every iter + |loss_shake - loss_ts| penalty.
+    # Halved n_iters since each iter does 2x compute (one shake forward + one ts forward).
+    ("balance-penalty-lambda1.0",
+     "--variant balance-penalty --n-iters 5000 --span 1.0 --seed 1337 --eval-interval 250 --log-interval 100 --lambda-balance 1.0"),
+
+    # boundary-migration: each neuron has a permanent rank; one mutable boundary scalar
+    # controls the split. EMA-driven control loop nudges boundary to give the harder
+    # cohort more capacity. No gradient on masks; same neurons cross back & forth.
+    ("boundary-migration-default",
+     "--variant boundary-migration --n-iters 10000 --span 1.0 --seed 1337 --eval-interval 500 --log-interval 250 --migration-interval 100 --migration-step 0.005 --migration-threshold 0.02 --migration-warmup 500 --ema-alpha 0.99"),
+
+    # Damped follow-ups: first run overshot (boundary went 0.5 → 0.065, TS collapsed).
+    # These bound the migration in different ways to find the sweet spot.
+
+    # 1. Small step throughout — slow & steady, never reaches extremes.
+    ("boundary-migration-small",
+     "--variant boundary-migration --n-iters 10000 --span 1.0 --seed 1337 --eval-interval 500 --log-interval 250 --migration-interval 100 --migration-step 0.001 --migration-threshold 0.02 --migration-warmup 500 --ema-alpha 0.99"),
+
+    # 2. Cap on total boundary movement — boundary stays in [0.35, 0.65].
+    ("boundary-migration-cap0.15",
+     "--variant boundary-migration --n-iters 10000 --span 1.0 --seed 1337 --eval-interval 500 --log-interval 250 --migration-interval 100 --migration-step 0.005 --migration-threshold 0.02 --migration-warmup 500 --ema-alpha 0.99 --migration-boundary-cap 0.15"),
+
+    # 3. Time-decayed step — starts at 0.005, decays linearly to 0 by iter 10k.
+    ("boundary-migration-decay",
+     "--variant boundary-migration --n-iters 10000 --span 1.0 --seed 1337 --eval-interval 500 --log-interval 250 --migration-interval 100 --migration-step 0.005 --migration-threshold 0.02 --migration-warmup 500 --ema-alpha 0.99 --migration-step-decay"),
+
+    # PHASE-2 RETRAIN protocol: bake a post-phase-1 boundary into iter-0 init,
+    # disable migration for the whole run. Tests whether the "phase-1 winners"
+    # were measuring real-allocation benefits or just transient unlearn-relearn
+    # contamination. Boundaries chosen from phase-1 final values: small→0.42,
+    # cap→0.35, decay→0.30. Compare these to fixed-mn (boundary=0.5) and the
+    # corresponding phase-1 variant.
+    # Boundary values are the EXACT phase-1 final boundaries from each
+    # damped variant (small/cap0.15/decay), so the comparison is apples-to-apples:
+    # "what did online-migration with boundary X get at iter 10k?" vs
+    # "what does static-boundary-X get at iter 10k starting from fresh init?"
+    ("phase2-boundary-0.41",
+     "--variant boundary-migration --n-iters 10000 --span 1.0 --seed 1337 --eval-interval 500 --log-interval 250 --initial-boundary 0.4090 --migration-step 0 --migration-warmup 999999"),
+
+    ("phase2-boundary-0.35",
+     "--variant boundary-migration --n-iters 10000 --span 1.0 --seed 1337 --eval-interval 500 --log-interval 250 --initial-boundary 0.3500 --migration-step 0 --migration-warmup 999999"),
+
+    ("phase2-boundary-0.30",
+     "--variant boundary-migration --n-iters 10000 --span 1.0 --seed 1337 --eval-interval 500 --log-interval 250 --initial-boundary 0.2954 --migration-step 0 --migration-warmup 999999"),
+
     ("fixed-mn-span0.3",
      "--variant fixed-mn --n-iters 10000 --span 0.3 --alpha-dist beta_half"),
 
