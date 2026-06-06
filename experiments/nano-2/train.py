@@ -186,6 +186,8 @@ def train_with_logging(
     lambda_var=0.1,
     var_gamma=0.25,
     warmup_mn=0,
+    balance_penalty=False,
+    lambda_balance=1.0,
 ):
     """Same logic as gated_gpt_tent.train_gated, but writes a structured JSONL log.
 
@@ -324,29 +326,50 @@ def train_with_logging(
     for it in range(n_iters):
         cur_lr = apply_lr(it)
 
-        alpha = sample_alpha()
-        use_shake = torch.rand(1).item() < alpha
-        if use_shake:
-            X, Y = get_shake_batch()
-            n_shake += 1
-            cohort = 'shake'
-        else:
-            X, Y = get_ts_batch()
-            n_ts += 1
-            cohort = 'ts'
+        balance_pen = None  # populated only in balance-penalty mode
+        var_pen = None      # populated only in trainable-mn mode
 
-        with torch.amp.autocast(device_type=device, dtype=amp_dtype):
-            if ungated:
-                _, ce_loss = model(X, Y)
+        if balance_penalty:
+            # Dual-batch step: train on shake AT alpha=1 AND ts AT alpha=0 in
+            # the same backward, with an extra term penalizing |loss_shake - loss_ts|.
+            # This puts gradient pressure DIRECTLY on the imbalance — the optimizer
+            # can satisfy it by adapting weights, m_n, or both.
+            X_sh, Y_sh = get_shake_batch()
+            X_ts, Y_ts = get_ts_batch()
+            n_shake += 1
+            n_ts += 1
+            cohort = 'both'
+            alpha = -1  # sentinel — we used two different alphas
+            with torch.amp.autocast(device_type=device, dtype=amp_dtype):
+                _, loss_sh = model(X_sh, 1.0, Y_sh)
+                _, loss_ts = model(X_ts, 0.0, Y_ts)
+                ce_loss = 0.5 * (loss_sh + loss_ts)
+                balance_pen = (loss_sh - loss_ts).abs()
+                loss = ce_loss + lambda_balance * balance_pen
+        else:
+            alpha = sample_alpha()
+            use_shake = torch.rand(1).item() < alpha
+            if use_shake:
+                X, Y = get_shake_batch()
+                n_shake += 1
+                cohort = 'shake'
             else:
-                _, ce_loss = model(X, alpha, Y)
-            # Variance regularizer (trainable_masks=True only; zero otherwise)
-            if trainable_masks and lambda_var > 0:
-                var_pen = model.mask_variance_regularizer(gamma=var_gamma)
-                loss = ce_loss + lambda_var * var_pen
-            else:
-                loss = ce_loss
-                var_pen = None
+                X, Y = get_ts_batch()
+                n_ts += 1
+                cohort = 'ts'
+
+            with torch.amp.autocast(device_type=device, dtype=amp_dtype):
+                if ungated:
+                    _, ce_loss = model(X, Y)
+                else:
+                    _, ce_loss = model(X, alpha, Y)
+                # Variance regularizer (trainable_masks=True only; zero otherwise)
+                if trainable_masks and lambda_var > 0:
+                    var_pen = model.mask_variance_regularizer(gamma=var_gamma)
+                    loss = ce_loss + lambda_var * var_pen
+                else:
+                    loss = ce_loss
+                    var_pen = None
         loss.backward()
         # Warmup: zero mask gradients for first warmup_mn iters so weights find
         # their initial specialization before m_n starts drifting.
@@ -376,10 +399,17 @@ def train_with_logging(
             }
             if var_pen is not None:
                 rec['var_penalty'] = float(var_pen.item())
+            if balance_penalty and balance_pen is not None:
+                rec['balance_penalty'] = float(balance_pen.item())
+                rec['loss_shake'] = float(loss_sh.item())
+                rec['loss_ts'] = float(loss_ts.item())
             emit(rec)
-            extra = f" var_pen={var_pen.item():.4f}" if var_pen is not None else ""
-            print(f"iter {it+1:5d} | alpha {alpha:.2f} | {cohort:>5s} | "
-                  f"loss {train_loss:.4f} | lr {cur_lr:.6f} | dt {dt:.1f}s{extra}", flush=True)
+            extras = ''
+            if var_pen is not None: extras += f" var_pen={var_pen.item():.4f}"
+            if balance_pen is not None:
+                extras += f" bal_pen={balance_pen.item():.4f} sh={loss_sh.item():.3f} ts={loss_ts.item():.3f}"
+            print(f"iter {it+1:5d} | alpha {alpha:>5} | {cohort:>5s} | "
+                  f"loss {train_loss:.4f} | lr {cur_lr:.6f} | dt {dt:.1f}s{extras}", flush=True)
             t_log = time.time()
 
         if (it + 1) % eval_interval == 0:
@@ -423,8 +453,9 @@ def train_with_logging(
 # ---------------------------------------------------------------------------
 def main():
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    p.add_argument('--variant', choices=['ungated', 'fixed-mn', 'trainable-mn'], required=True,
-                   help='ungated = vanilla GPT no gate; fixed-mn = original nano-2; trainable-mn = step 2')
+    p.add_argument('--variant', choices=['ungated', 'fixed-mn', 'trainable-mn', 'balance-penalty'], required=True,
+                   help='ungated = vanilla GPT; fixed-mn = original nano-2; trainable-mn = sigmoid-logits masks; '
+                        'balance-penalty = fixed-mn + dual-batch + |loss_shake - loss_ts| penalty')
     p.add_argument('--variant-name', required=True,
                    help='subdir name under experiments/nano-2/results/<variant-name>/')
     p.add_argument('--data-dir', default=str(REPO_ROOT / 'data/shakespeare_tinystories_char'))
@@ -460,6 +491,8 @@ def main():
                    help='(trainable-mn only) variance-floor regularizer strength')
     p.add_argument('--warmup-mn', type=int, default=0,
                    help='(trainable-mn only) freeze m_n for first N iters')
+    p.add_argument('--lambda-balance', type=float, default=1.0,
+                   help='(balance-penalty only) weight on the |loss_shake - loss_ts| term in the combined loss')
     # Device + smoke
     p.add_argument('--device', default='cuda' if torch.cuda.is_available() else 'cpu')
     p.add_argument('--amp-dtype', default='bfloat16', choices=['bfloat16', 'float16', 'float32'])
@@ -516,6 +549,9 @@ def main():
         model = GPT(cfg).to(args.device)
         ungated = True
     else:
+        # fixed-mn / trainable-mn / balance-penalty all use GatedGPT.
+        # balance-penalty uses FIXED masks by default — the imbalance penalty
+        # shapes the weights (and m_n if trainable_masks is also True).
         cfg = GatedGPTConfig(
             vocab_size=vocab_size, n_layer=args.n_layer, n_head=args.n_head,
             n_embd=args.n_embd, block_size=args.block_size, dropout=args.dropout,
@@ -545,6 +581,8 @@ def main():
         mask_lr_ratio=args.mask_lr_ratio,
         lambda_var=args.lambda_var,
         warmup_mn=args.warmup_mn,
+        balance_penalty=(args.variant == 'balance-penalty'),
+        lambda_balance=args.lambda_balance,
     )
 
     # Save final summary + final m_n snapshot if applicable
