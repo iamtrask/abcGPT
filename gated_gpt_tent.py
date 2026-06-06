@@ -160,10 +160,25 @@ class GatedGPTConfig:
     bias: bool = False
     mask_seed: int = 1337       # fixed seed for reproducible mask sampling
     tent_narrowness: float = 1.0  # 1.0 = full-width tent; <1 narrows each neuron's fire-zone
+    trainable_masks: bool = False  # when True, M_embd / M_head / M_inner become nn.Parameter
+                                   # via sigmoid(logits) so they stay in [0,1] under gradient updates.
+                                   # Caller is expected to put mask logits in a separate optimizer
+                                   # param group with a much smaller LR (see GatedGPT.m_n_logits()).
+
+
+def _beta_to_logit(m, eps=1e-4):
+    """Inverse sigmoid. If m = sigmoid(l), this returns l.
+
+    Used to initialize trainable mask logits so sigmoid(logits) equals the
+    Beta(0.5, 0.5) sample we'd otherwise store as a buffer — keeping the
+    "fixed init" identical between fixed and trainable modes.
+    """
+    m = m.clamp(eps, 1 - eps)
+    return torch.log(m / (1 - m))
 
 
 class GatedSelfAttention(nn.Module):
-    def __init__(self, config: GatedGPTConfig, layer_idx: int, M_embd: torch.Tensor):
+    def __init__(self, config: GatedGPTConfig, layer_idx: int, M_embd_or_logits: torch.Tensor):
         super().__init__()
         assert config.n_embd % config.n_head == 0
         self.c_attn = nn.Linear(config.n_embd, 3 * config.n_embd, bias=config.bias)
@@ -174,9 +189,22 @@ class GatedSelfAttention(nn.Module):
         self.head_dim = config.n_embd // config.n_head
         self.dropout = config.dropout
         self.narrowness = config.tent_narrowness
-        mask = sample_beta_half_mask((config.n_head,), seed=config.mask_seed + 100 * layer_idx + 1)
-        self.register_buffer('M_head', mask)
-        self.register_buffer('M_embd', M_embd)
+        self.trainable_masks = config.trainable_masks
+        head_init = sample_beta_half_mask((config.n_head,), seed=config.mask_seed + 100 * layer_idx + 1)
+        if config.trainable_masks:
+            self.M_head_logits = nn.Parameter(_beta_to_logit(head_init))
+            # M_embd_or_logits is a Parameter owned by GatedGPT root; share via weight-tying.
+            # Same pattern as wte.weight = lm_head.weight in nanoGPT — pytorch handles dedup.
+            self.M_embd_logits = M_embd_or_logits
+        else:
+            self.register_buffer('M_head', head_init)
+            self.register_buffer('M_embd', M_embd_or_logits)
+
+    def _M_head(self):
+        return torch.sigmoid(self.M_head_logits) if self.trainable_masks else self.M_head
+
+    def _M_embd(self):
+        return torch.sigmoid(self.M_embd_logits) if self.trainable_masks else self.M_embd
 
     def forward(self, x: torch.Tensor, alpha: float, corpus) -> torch.Tensor:
         B, T, C = x.size()
@@ -189,29 +217,40 @@ class GatedSelfAttention(nn.Module):
             dropout_p=self.dropout if self.training else 0.0,
             is_causal=True,
         )  # (B, H, T, hd)
-        y = gate_with_corpus(y, self.M_head.view(1, self.n_head, 1, 1), alpha, corpus, self.narrowness)
+        y = gate_with_corpus(y, self._M_head().view(1, self.n_head, 1, 1), alpha, corpus, self.narrowness)
         y = y.transpose(1, 2).contiguous().view(B, T, C)
         out = self.c_proj(y)
-        out = gate_with_corpus(out, self.M_embd, alpha, corpus, self.narrowness)
+        out = gate_with_corpus(out, self._M_embd(), alpha, corpus, self.narrowness)
         return self.resid_dropout(out)
 
 
 class GatedMLP(nn.Module):
-    def __init__(self, config: GatedGPTConfig, layer_idx: int, M_embd: torch.Tensor):
+    def __init__(self, config: GatedGPTConfig, layer_idx: int, M_embd_or_logits: torch.Tensor):
         super().__init__()
         self.c_fc = nn.Linear(config.n_embd, 4 * config.n_embd, bias=config.bias)
         self.c_proj = nn.Linear(4 * config.n_embd, config.n_embd, bias=config.bias)
         self.dropout = nn.Dropout(config.dropout)
         self.narrowness = config.tent_narrowness
-        mask = sample_beta_half_mask((4 * config.n_embd,), seed=config.mask_seed + 100 * layer_idx + 2)
-        self.register_buffer('M_inner', mask)
-        self.register_buffer('M_embd', M_embd)
+        self.trainable_masks = config.trainable_masks
+        inner_init = sample_beta_half_mask((4 * config.n_embd,), seed=config.mask_seed + 100 * layer_idx + 2)
+        if config.trainable_masks:
+            self.M_inner_logits = nn.Parameter(_beta_to_logit(inner_init))
+            self.M_embd_logits = M_embd_or_logits  # shared Parameter from GatedGPT root
+        else:
+            self.register_buffer('M_inner', inner_init)
+            self.register_buffer('M_embd', M_embd_or_logits)
+
+    def _M_inner(self):
+        return torch.sigmoid(self.M_inner_logits) if self.trainable_masks else self.M_inner
+
+    def _M_embd(self):
+        return torch.sigmoid(self.M_embd_logits) if self.trainable_masks else self.M_embd
 
     def forward(self, x: torch.Tensor, alpha: float, corpus) -> torch.Tensor:
         h = F.gelu(self.c_fc(x))                                                            # (B, T, 4D)
-        h = gate_with_corpus(h, self.M_inner, alpha, corpus, self.narrowness)               # MLP-inner gate
+        h = gate_with_corpus(h, self._M_inner(), alpha, corpus, self.narrowness)            # MLP-inner gate
         h = self.c_proj(h)
-        h = gate_with_corpus(h, self.M_embd, alpha, corpus, self.narrowness)                # residual-stream gate
+        h = gate_with_corpus(h, self._M_embd(), alpha, corpus, self.narrowness)             # residual-stream gate
         return self.dropout(h)
 
 
@@ -233,28 +272,41 @@ class GatedGPT(nn.Module):
     def __init__(self, config: GatedGPTConfig):
         super().__init__()
         self.config = config
+        self.narrowness = config.tent_narrowness
+        self.trainable_masks = config.trainable_masks
+
         # Global per-channel mask for the residual-stream (n_embd) dimension.
         # Sampled once with a layer-independent seed so re-runs reproduce it.
         # Shared across every module that touches the residual stream
         # (embeddings, every block's c_proj output, and ln_f output before lm_head).
-        M_embd = sample_beta_half_mask((config.n_embd,), seed=config.mask_seed)
-        self.register_buffer('M_embd', M_embd)
-        self.narrowness = config.tent_narrowness
+        M_embd_init = sample_beta_half_mask((config.n_embd,), seed=config.mask_seed)
+        if config.trainable_masks:
+            self.M_embd_logits = nn.Parameter(_beta_to_logit(M_embd_init))
+            shared = self.M_embd_logits
+        else:
+            self.register_buffer('M_embd', M_embd_init)
+            shared = M_embd_init  # buffer tensor reference passed down
 
         self.transformer = nn.ModuleDict(dict(
             wte=nn.Embedding(config.vocab_size, config.n_embd),
             wpe=nn.Embedding(config.block_size, config.n_embd),
             drop=nn.Dropout(config.dropout),
-            h=nn.ModuleList([GatedBlock(config, i, M_embd) for i in range(config.n_layer)]),
+            h=nn.ModuleList([GatedBlock(config, i, shared) for i in range(config.n_layer)]),
             ln_f=nn.LayerNorm(config.n_embd, bias=config.bias),
         ))
         self.lm_head = nn.Linear(config.n_embd, config.vocab_size, bias=False)
         self.transformer.wte.weight = self.lm_head.weight  # weight tying
 
+        # Initialize linear/embedding weights, but DON'T overwrite mask logits.
+        # _init_weights would normally re-init nn.Parameter tensors; we apply it
+        # to modules and rely on the fact that mask logits are not nn.Linear/Embedding.
         self.apply(self._init_weights)
         for pn, p in self.named_parameters():
             if pn.endswith('c_proj.weight'):
                 torch.nn.init.normal_(p, mean=0.0, std=0.02 / math.sqrt(2 * config.n_layer))
+
+    def _M_embd(self):
+        return torch.sigmoid(self.M_embd_logits) if self.trainable_masks else self.M_embd
 
 
     def _init_weights(self, module):
@@ -275,16 +327,19 @@ class GatedGPT(nn.Module):
         """
         B, T = idx.size()
         pos = torch.arange(0, T, dtype=torch.long, device=idx.device)
+        # Compute the sigmoid-decoded M_embd once per forward (trainable case);
+        # for fixed buffers _M_embd() returns the buffer directly.
+        M_embd = self._M_embd()
         # Gate the initial residual stream (embedding output)
         x = self.transformer.wte(idx) + self.transformer.wpe(pos)
-        x = gate_with_corpus(x, self.M_embd, alpha, corpus, self.narrowness)
+        x = gate_with_corpus(x, M_embd, alpha, corpus, self.narrowness)
         x = self.transformer.drop(x)
         for block in self.transformer.h:
             x = block(x, alpha, corpus)
         # ln_f normalizes the residual stream; gate again so lm_head only sees
         # the active channels at this alpha
         x = self.transformer.ln_f(x)
-        x = gate_with_corpus(x, self.M_embd, alpha, corpus, self.narrowness)
+        x = gate_with_corpus(x, M_embd, alpha, corpus, self.narrowness)
         if targets is not None:
             logits = self.lm_head(x)
             loss = F.cross_entropy(logits.view(-1, logits.size(-1)), targets.view(-1), ignore_index=-1)
@@ -311,7 +366,11 @@ class GatedGPT(nn.Module):
         return idx
 
     def mask_summary(self):
-        """Quick per-mask histogram for sanity-checking the Beta(0.5,0.5) sample."""
+        """Quick per-mask histogram for sanity-checking the Beta(0.5,0.5) sample.
+
+        For trainable masks, returns the *sigmoid-decoded* current values
+        (i.e., the actual mask values flowing through the gate), not the raw logits.
+        """
         def stats(M):
             return {
                 'mean': float(M.mean()),
@@ -320,11 +379,60 @@ class GatedGPT(nn.Module):
                 'halfsies (0.1..0.9)':      int(((M >= 0.1) & (M <= 0.9)).sum()),
                 'total': int(M.numel()),
             }
-        out = {'M_embd (global residual-stream)': stats(self.M_embd)}
-        for i, block in enumerate(self.transformer.h):
-            out[f'layer_{i}_attn_heads'] = stats(block.attn.M_head)
-            out[f'layer_{i}_mlp_inner']  = stats(block.mlp.M_inner)
+        with torch.no_grad():
+            out = {'M_embd (global residual-stream)': stats(self._M_embd())}
+            for i, block in enumerate(self.transformer.h):
+                out[f'layer_{i}_attn_heads'] = stats(block.attn._M_head())
+                out[f'layer_{i}_mlp_inner']  = stats(block.mlp._M_inner())
         return out
+
+    def mask_logit_params(self):
+        """Iterate over all mask logit Parameters (for separate optimizer LR group).
+
+        Returns an empty iterator if trainable_masks=False.
+        """
+        if not self.trainable_masks:
+            return
+        # M_embd is owned by GatedGPT and SHARED across blocks via weight-tying.
+        # Yielding it from here only (not from each block's attn/mlp) avoids
+        # double-counting in the optimizer.
+        yield self.M_embd_logits
+        for block in self.transformer.h:
+            yield block.attn.M_head_logits
+            yield block.mlp.M_inner_logits
+
+    def mask_variance_regularizer(self, gamma=0.25):
+        """Anti-collapse penalty on the population standard deviation of each mask.
+
+        Returns sum over all masks of ReLU(gamma - std(sigmoid(logits)))**2.
+        Zero if std(M) >= gamma everywhere. Larger gamma forces wider spread.
+
+        Recommended: γ=0.25 keeps the m_n distribution close to uniform-spread
+        on [0,1] (uniform[0,1] has std ≈ 0.289; Beta(0.5,0.5) has std ≈ 0.354).
+        Combine with a `lambda_var` weight at the call site.
+        """
+        if not self.trainable_masks:
+            return torch.tensor(0.0)
+        # Compute per-mask penalty
+        device = self.M_embd_logits.device
+        total = torch.tensor(0.0, device=device)
+        masks = [self._M_embd()]
+        for block in self.transformer.h:
+            masks.append(block.attn._M_head())
+            masks.append(block.mlp._M_inner())
+        for M in masks:
+            std = M.std()
+            total = total + F.relu(gamma - std) ** 2
+        return total
+
+    def m_n_drift_from_init(self, init_M_embd):
+        """L2 distance between current M_embd and a captured init snapshot.
+
+        For diagnostic logging only. init_M_embd should be a tensor on the
+        same device as the model's M_embd.
+        """
+        cur = self._M_embd()
+        return float(((cur - init_M_embd.to(cur.device)) ** 2).sum().sqrt())
 
 
 # ============================================================================
