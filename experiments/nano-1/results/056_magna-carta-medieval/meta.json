@@ -1,0 +1,9 @@
+{
+  "vocab_size": 126,
+  "train_tokens": 998927,
+  "val_tokens": 110992,
+  "source_name": "056_magna-carta-medieval",
+  "best_val_loss": 2.299379587173462,
+  "n_eval_points": 21,
+  "wall_clock_s": 135.0
+}

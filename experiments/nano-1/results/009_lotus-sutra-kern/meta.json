@@ -1,0 +1,9 @@
+{
+  "vocab_size": 110,
+  "train_tokens": 778594,
+  "val_tokens": 86511,
+  "source_name": "009_lotus-sutra-kern",
+  "best_val_loss": 2.6559746265411377,
+  "n_eval_points": 21,
+  "wall_clock_s": 4318.723103046417
+}

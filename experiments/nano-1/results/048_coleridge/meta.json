@@ -1,0 +1,9 @@
+{
+  "vocab_size": 231,
+  "train_tokens": 999784,
+  "val_tokens": 111088,
+  "source_name": "048_coleridge",
+  "best_val_loss": 1.4516,
+  "n_eval_points": 21,
+  "wall_clock_s": 132.0
+}

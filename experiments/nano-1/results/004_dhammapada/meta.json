@@ -1,0 +1,9 @@
+{
+  "vocab_size": 77,
+  "train_tokens": 60086,
+  "val_tokens": 6677,
+  "source_name": "004_dhammapada",
+  "best_val_loss": 1.793,
+  "n_eval_points": 21,
+  "wall_clock_s": 3686.156152009964
+}

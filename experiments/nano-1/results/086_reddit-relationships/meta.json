@@ -1,0 +1,9 @@
+{
+  "vocab_size": 160,
+  "train_tokens": 996283,
+  "val_tokens": 110699,
+  "source_name": "086_reddit-relationships",
+  "best_val_loss": 1.1279823780059814,
+  "n_eval_points": 21,
+  "wall_clock_s": 129.0
+}

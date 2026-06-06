@@ -1,0 +1,9 @@
+{
+  "vocab_size": 637,
+  "train_tokens": 989460,
+  "val_tokens": 109941,
+  "source_name": "087_reddit-wallstreetbets",
+  "best_val_loss": 1.4525789022445679,
+  "n_eval_points": 21,
+  "wall_clock_s": 132.0
+}

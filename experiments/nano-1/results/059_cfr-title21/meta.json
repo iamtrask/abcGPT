@@ -1,0 +1,9 @@
+{
+  "vocab_size": 91,
+  "train_tokens": 998757,
+  "val_tokens": 110973,
+  "source_name": "059_cfr-title21",
+  "best_val_loss": 1.0079765319824219,
+  "n_eval_points": 21,
+  "wall_clock_s": 792.0
+}

@@ -1,0 +1,9 @@
+{
+  "vocab_size": 81,
+  "train_tokens": 1002721,
+  "val_tokens": 111414,
+  "source_name": "052_uspto-patents",
+  "best_val_loss": 0.8101,
+  "n_eval_points": 21,
+  "wall_clock_s": 141.0
+}

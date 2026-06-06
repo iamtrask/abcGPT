@@ -1,0 +1,9 @@
+{
+  "vocab_size": 80,
+  "train_tokens": 49316,
+  "val_tokens": 5480,
+  "source_name": "008_methodist-hymnal",
+  "best_val_loss": 1.5193,
+  "n_eval_points": 21,
+  "wall_clock_s": 3638.4063234329224
+}

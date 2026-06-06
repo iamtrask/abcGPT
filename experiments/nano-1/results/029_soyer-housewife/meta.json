@@ -1,0 +1,9 @@
+{
+  "vocab_size": 104,
+  "train_tokens": 797253,
+  "val_tokens": 88584,
+  "source_name": "029_soyer-housewife",
+  "best_val_loss": 2.0079,
+  "n_eval_points": 21,
+  "wall_clock_s": 4355.048403739929
+}

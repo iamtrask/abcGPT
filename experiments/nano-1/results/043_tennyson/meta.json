@@ -1,0 +1,9 @@
+{
+  "vocab_size": 192,
+  "train_tokens": 983247,
+  "val_tokens": 109250,
+  "source_name": "043_tennyson",
+  "best_val_loss": 1.4255,
+  "n_eval_points": 21,
+  "wall_clock_s": 155.0
+}

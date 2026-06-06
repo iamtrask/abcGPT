@@ -1,0 +1,9 @@
+{
+  "vocab_size": 72,
+  "train_tokens": 1002611,
+  "val_tokens": 111402,
+  "source_name": "000_kjv-bible",
+  "best_val_loss": 1.0756,
+  "n_eval_points": 21,
+  "wall_clock_s": 4369.686533212662
+}

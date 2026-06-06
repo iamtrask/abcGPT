@@ -1,0 +1,9 @@
+{
+  "vocab_size": 97,
+  "train_tokens": 668927,
+  "val_tokens": 74326,
+  "source_name": "039_chekhov",
+  "best_val_loss": 1.9498,
+  "n_eval_points": 21,
+  "wall_clock_s": 155.0
+}

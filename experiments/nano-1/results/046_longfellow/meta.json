@@ -1,0 +1,9 @@
+{
+  "vocab_size": 142,
+  "train_tokens": 1002754,
+  "val_tokens": 111418,
+  "source_name": "046_longfellow",
+  "best_val_loss": 1.4295945167541504,
+  "n_eval_points": 21,
+  "wall_clock_s": 156.0
+}

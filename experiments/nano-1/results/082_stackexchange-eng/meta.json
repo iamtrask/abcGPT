@@ -1,0 +1,9 @@
+{
+  "vocab_size": 498,
+  "train_tokens": 996966,
+  "val_tokens": 110775,
+  "source_name": "082_stackexchange-eng",
+  "best_val_loss": 1.396,
+  "n_eval_points": 21,
+  "wall_clock_s": 130.0
+}

@@ -1,0 +1,9 @@
+{
+  "vocab_size": 94,
+  "train_tokens": 747088,
+  "val_tokens": 83010,
+  "source_name": "024_international-jewish-cookbook",
+  "best_val_loss": 1.9093525409698486,
+  "n_eval_points": 21,
+  "wall_clock_s": 3636.9447491168976
+}

@@ -1,0 +1,9 @@
+{
+  "vocab_size": 91,
+  "train_tokens": 813538,
+  "val_tokens": 90394,
+  "source_name": "044_rossetti-christina",
+  "best_val_loss": 1.5693800449371338,
+  "n_eval_points": 21,
+  "wall_clock_s": 154.0
+}

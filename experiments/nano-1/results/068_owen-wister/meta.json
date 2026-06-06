@@ -1,0 +1,9 @@
+{
+  "vocab_size": 82,
+  "train_tokens": 976293,
+  "val_tokens": 108478,
+  "source_name": "068_owen-wister",
+  "best_val_loss": 1.3228771686553955,
+  "n_eval_points": 21,
+  "wall_clock_s": 128.0
+}

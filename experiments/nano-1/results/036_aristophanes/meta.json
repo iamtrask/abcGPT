@@ -1,0 +1,9 @@
+{
+  "vocab_size": 96,
+  "train_tokens": 999817,
+  "val_tokens": 111091,
+  "source_name": "036_aristophanes",
+  "best_val_loss": 1.4330917596817017,
+  "n_eval_points": 21,
+  "wall_clock_s": 147.0
+}

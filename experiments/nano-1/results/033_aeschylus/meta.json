@@ -1,0 +1,9 @@
+{
+  "vocab_size": 185,
+  "train_tokens": 996792,
+  "val_tokens": 110755,
+  "source_name": "033_aeschylus",
+  "best_val_loss": 1.3399,
+  "n_eval_points": 21,
+  "wall_clock_s": 150.0
+}

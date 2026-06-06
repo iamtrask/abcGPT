@@ -1,0 +1,9 @@
+{
+  "vocab_size": 81,
+  "train_tokens": 468494,
+  "val_tokens": 52055,
+  "source_name": "013_grimm-fairy-tales",
+  "best_val_loss": 1.2561657428741455,
+  "n_eval_points": 21,
+  "wall_clock_s": 3608.4695138931274
+}

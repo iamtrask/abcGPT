@@ -1,0 +1,9 @@
+{
+  "vocab_size": 68,
+  "train_tokens": 1003851,
+  "val_tokens": 111539,
+  "source_name": "076_retrosheet-baseball",
+  "best_val_loss": 0.272,
+  "n_eval_points": 21,
+  "wall_clock_s": 134.0
+}

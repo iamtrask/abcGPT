@@ -1,0 +1,9 @@
+{
+  "vocab_size": 78,
+  "train_tokens": 715213,
+  "val_tokens": 79469,
+  "source_name": "006_apocrypha",
+  "best_val_loss": 1.1771968603134155,
+  "n_eval_points": 21,
+  "wall_clock_s": 3996.105550289154
+}

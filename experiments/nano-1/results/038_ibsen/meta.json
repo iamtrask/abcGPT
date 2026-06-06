@@ -1,0 +1,9 @@
+{
+  "vocab_size": 95,
+  "train_tokens": 998207,
+  "val_tokens": 110912,
+  "source_name": "038_ibsen",
+  "best_val_loss": 0.807984471321106,
+  "n_eval_points": 21,
+  "wall_clock_s": 159.0
+}

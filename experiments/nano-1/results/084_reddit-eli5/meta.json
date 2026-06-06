@@ -1,0 +1,9 @@
+{
+  "vocab_size": 183,
+  "train_tokens": 999842,
+  "val_tokens": 111094,
+  "source_name": "084_reddit-eli5",
+  "best_val_loss": 1.3474,
+  "n_eval_points": 21,
+  "wall_clock_s": 132.0
+}

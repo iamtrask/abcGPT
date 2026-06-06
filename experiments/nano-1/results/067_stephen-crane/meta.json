@@ -1,0 +1,9 @@
+{
+  "vocab_size": 89,
+  "train_tokens": 997775,
+  "val_tokens": 110864,
+  "source_name": "067_stephen-crane",
+  "best_val_loss": 1.3098,
+  "n_eval_points": 21,
+  "wall_clock_s": 131.0
+}

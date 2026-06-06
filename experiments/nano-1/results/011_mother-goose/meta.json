@@ -1,0 +1,9 @@
+{
+  "vocab_size": 80,
+  "train_tokens": 104785,
+  "val_tokens": 11643,
+  "source_name": "011_mother-goose",
+  "best_val_loss": 1.5179,
+  "n_eval_points": 21,
+  "wall_clock_s": 3577.4043250083923
+}

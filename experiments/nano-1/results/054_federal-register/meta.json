@@ -1,0 +1,9 @@
+{
+  "vocab_size": 88,
+  "train_tokens": 1000759,
+  "val_tokens": 111196,
+  "source_name": "054_federal-register",
+  "best_val_loss": 0.947,
+  "n_eval_points": 21,
+  "wall_clock_s": 127.0
+}

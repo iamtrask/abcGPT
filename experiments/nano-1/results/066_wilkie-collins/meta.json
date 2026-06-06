@@ -1,0 +1,9 @@
+{
+  "vocab_size": 83,
+  "train_tokens": 984346,
+  "val_tokens": 109372,
+  "source_name": "066_wilkie-collins",
+  "best_val_loss": 1.2785512208938599,
+  "n_eval_points": 21,
+  "wall_clock_s": 803.0
+}

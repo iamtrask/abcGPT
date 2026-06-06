@@ -1,0 +1,9 @@
+{
+  "vocab_size": 80,
+  "train_tokens": 157192,
+  "val_tokens": 17466,
+  "source_name": "041_dickinson",
+  "best_val_loss": 1.6412,
+  "n_eval_points": 21,
+  "wall_clock_s": 128.0
+}

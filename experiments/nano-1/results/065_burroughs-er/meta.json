@@ -1,0 +1,9 @@
+{
+  "vocab_size": 84,
+  "train_tokens": 994274,
+  "val_tokens": 110475,
+  "source_name": "065_burroughs-er",
+  "best_val_loss": 1.268,
+  "n_eval_points": 21,
+  "wall_clock_s": 135.0
+}

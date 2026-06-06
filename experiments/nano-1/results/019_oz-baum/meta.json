@@ -1,0 +1,9 @@
+{
+  "vocab_size": 85,
+  "train_tokens": 588400,
+  "val_tokens": 65378,
+  "source_name": "019_oz-baum",
+  "best_val_loss": 1.3053776025772095,
+  "n_eval_points": 21,
+  "wall_clock_s": 4334.620441436768
+}

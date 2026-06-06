@@ -1,0 +1,9 @@
+{
+  "vocab_size": 106,
+  "train_tokens": 988560,
+  "val_tokens": 109840,
+  "source_name": "001_quran-rodwell",
+  "best_val_loss": 1.1174991130828857,
+  "n_eval_points": 21,
+  "wall_clock_s": 3520.9722871780396
+}

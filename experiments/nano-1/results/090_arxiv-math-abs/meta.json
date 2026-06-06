@@ -1,0 +1,9 @@
+{
+  "vocab_size": 134,
+  "train_tokens": 1003178,
+  "val_tokens": 111465,
+  "source_name": "090_arxiv-math-abs",
+  "best_val_loss": 1.02278470993042,
+  "n_eval_points": 21,
+  "wall_clock_s": 148.0
+}

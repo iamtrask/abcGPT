@@ -1,0 +1,9 @@
+{
+  "vocab_size": 108,
+  "train_tokens": 994888,
+  "val_tokens": 110544,
+  "source_name": "037_moliere",
+  "best_val_loss": 1.3536,
+  "n_eval_points": 21,
+  "wall_clock_s": 820.0
+}

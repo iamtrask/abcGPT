@@ -1,0 +1,9 @@
+{
+  "vocab_size": 84,
+  "train_tokens": 146939,
+  "val_tokens": 16327,
+  "source_name": "018_beatrix-potter",
+  "best_val_loss": 1.597387433052063,
+  "n_eval_points": 21,
+  "wall_clock_s": 4362.438196659088
+}

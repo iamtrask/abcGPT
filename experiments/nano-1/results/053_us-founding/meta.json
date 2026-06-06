@@ -1,0 +1,9 @@
+{
+  "vocab_size": 87,
+  "train_tokens": 1002293,
+  "val_tokens": 111366,
+  "source_name": "053_us-founding",
+  "best_val_loss": 0.963,
+  "n_eval_points": 21,
+  "wall_clock_s": 137.0
+}

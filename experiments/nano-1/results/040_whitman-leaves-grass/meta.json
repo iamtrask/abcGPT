@@ -1,0 +1,9 @@
+{
+  "vocab_size": 90,
+  "train_tokens": 999415,
+  "val_tokens": 111047,
+  "source_name": "040_whitman-leaves-grass",
+  "best_val_loss": 0.8785607814788818,
+  "n_eval_points": 21,
+  "wall_clock_s": 170.0
+}

@@ -1,0 +1,9 @@
+{
+  "vocab_size": 105,
+  "train_tokens": 1001793,
+  "val_tokens": 111311,
+  "source_name": "023_eliza-acton",
+  "best_val_loss": 0.9193783402442932,
+  "n_eval_points": 21,
+  "wall_clock_s": 3659.260692834854
+}

@@ -1,0 +1,9 @@
+{
+  "vocab_size": 84,
+  "train_tokens": 726440,
+  "val_tokens": 80716,
+  "source_name": "022_robert-may-accomplisht-cook",
+  "best_val_loss": 1.8757874965667725,
+  "n_eval_points": 21,
+  "wall_clock_s": 3616.2074921131134
+}

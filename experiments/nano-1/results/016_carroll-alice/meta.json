@@ -1,0 +1,9 @@
+{
+  "vocab_size": 85,
+  "train_tokens": 277820,
+  "val_tokens": 30869,
+  "source_name": "016_carroll-alice",
+  "best_val_loss": 1.3634612560272217,
+  "n_eval_points": 21,
+  "wall_clock_s": 3673.7160539627075
+}

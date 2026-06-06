@@ -1,0 +1,9 @@
+{
+  "vocab_size": 98,
+  "train_tokens": 1002605,
+  "val_tokens": 111401,
+  "source_name": "055_blackstone-commentaries",
+  "best_val_loss": 1.2974737882614136,
+  "n_eval_points": 21,
+  "wall_clock_s": 128.0
+}

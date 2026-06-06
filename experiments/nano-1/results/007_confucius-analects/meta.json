@@ -1,0 +1,9 @@
+{
+  "vocab_size": 74,
+  "train_tokens": 151708,
+  "val_tokens": 16857,
+  "source_name": "007_confucius-analects",
+  "best_val_loss": 1.3769,
+  "n_eval_points": 21,
+  "wall_clock_s": 3597.719578027725
+}

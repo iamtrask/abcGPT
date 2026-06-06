@@ -1,0 +1,9 @@
+{
+  "vocab_size": 137,
+  "train_tokens": 1003220,
+  "val_tokens": 111469,
+  "source_name": "099_math-reviews",
+  "best_val_loss": 1.381276249885559,
+  "n_eval_points": 21,
+  "wall_clock_s": 166.0
+}

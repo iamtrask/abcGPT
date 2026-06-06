@@ -1,0 +1,9 @@
+{
+  "vocab_size": 160,
+  "train_tokens": 996659,
+  "val_tokens": 110740,
+  "source_name": "089_reddit-legaladvice",
+  "best_val_loss": 1.1347,
+  "n_eval_points": 21,
+  "wall_clock_s": 159.0
+}

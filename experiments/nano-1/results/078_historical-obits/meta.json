@@ -1,0 +1,9 @@
+{
+  "vocab_size": 110,
+  "train_tokens": 999472,
+  "val_tokens": 111053,
+  "source_name": "078_historical-obits",
+  "best_val_loss": 1.386488437652588,
+  "n_eval_points": 21,
+  "wall_clock_s": 168.0
+}

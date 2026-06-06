@@ -1,0 +1,9 @@
+{
+  "vocab_size": 87,
+  "train_tokens": 999603,
+  "val_tokens": 111067,
+  "source_name": "097_cia-world-factbook",
+  "best_val_loss": 0.742789089679718,
+  "n_eval_points": 21,
+  "wall_clock_s": 166.0
+}

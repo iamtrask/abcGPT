@@ -1,0 +1,9 @@
+{
+  "vocab_size": 88,
+  "train_tokens": 193806,
+  "val_tokens": 21534,
+  "source_name": "015_lear-nonsense",
+  "best_val_loss": 1.5942758321762085,
+  "n_eval_points": 21,
+  "wall_clock_s": 3669.2942407131195
+}

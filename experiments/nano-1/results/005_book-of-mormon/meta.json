@@ -1,0 +1,9 @@
+{
+  "vocab_size": 73,
+  "train_tokens": 1003044,
+  "val_tokens": 111450,
+  "source_name": "005_book-of-mormon",
+  "best_val_loss": 0.839693546295166,
+  "n_eval_points": 21,
+  "wall_clock_s": 3611.771785736084
+}

@@ -1,0 +1,9 @@
+{
+  "vocab_size": 109,
+  "train_tokens": 853556,
+  "val_tokens": 94840,
+  "source_name": "045_poe-poems",
+  "best_val_loss": 1.2507,
+  "n_eval_points": 21,
+  "wall_clock_s": 149.0
+}

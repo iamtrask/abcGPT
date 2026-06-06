@@ -1,0 +1,9 @@
+{
+  "vocab_size": 82,
+  "train_tokens": 993540,
+  "val_tokens": 110394,
+  "source_name": "051_us-code-title18",
+  "best_val_loss": 0.9501778483390808,
+  "n_eval_points": 21,
+  "wall_clock_s": 128.0
+}

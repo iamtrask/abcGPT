@@ -1,0 +1,9 @@
+{
+  "vocab_size": 87,
+  "train_tokens": 87055,
+  "val_tokens": 9673,
+  "source_name": "042_blake-songs",
+  "best_val_loss": 2.1529,
+  "n_eval_points": 21,
+  "wall_clock_s": 129.0
+}

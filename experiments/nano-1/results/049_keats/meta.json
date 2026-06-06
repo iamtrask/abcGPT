@@ -1,0 +1,9 @@
+{
+  "vocab_size": 92,
+  "train_tokens": 501266,
+  "val_tokens": 55697,
+  "source_name": "049_keats",
+  "best_val_loss": 1.1546,
+  "n_eval_points": 21,
+  "wall_clock_s": 133.0
+}

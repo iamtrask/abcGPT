@@ -1,0 +1,9 @@
+{
+  "vocab_size": 88,
+  "train_tokens": 601082,
+  "val_tokens": 66787,
+  "source_name": "026_apicius-roman",
+  "best_val_loss": 1.606,
+  "n_eval_points": 21,
+  "wall_clock_s": 4200.53308224678
+}

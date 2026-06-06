@@ -1,0 +1,9 @@
+{
+  "vocab_size": 92,
+  "train_tokens": 1003773,
+  "val_tokens": 111531,
+  "source_name": "096_britannica-1911",
+  "best_val_loss": 1.4843761920928955,
+  "n_eval_points": 21,
+  "wall_clock_s": 161.0
+}

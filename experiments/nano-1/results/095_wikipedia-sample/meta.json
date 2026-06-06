@@ -1,0 +1,9 @@
+{
+  "vocab_size": 389,
+  "train_tokens": 999683,
+  "val_tokens": 111076,
+  "source_name": "095_wikipedia-sample",
+  "best_val_loss": 1.5923,
+  "n_eval_points": 21,
+  "wall_clock_s": 131.0
+}

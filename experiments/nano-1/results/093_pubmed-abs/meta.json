@@ -1,0 +1,9 @@
+{
+  "vocab_size": 153,
+  "train_tokens": 1000420,
+  "val_tokens": 111158,
+  "source_name": "093_pubmed-abs",
+  "best_val_loss": 1.1669,
+  "n_eval_points": 21,
+  "wall_clock_s": 172.0
+}

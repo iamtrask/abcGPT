@@ -1,0 +1,9 @@
+{
+  "vocab_size": 81,
+  "train_tokens": 985251,
+  "val_tokens": 109473,
+  "source_name": "064_dickens",
+  "best_val_loss": 1.3894739151000977,
+  "n_eval_points": 21,
+  "wall_clock_s": 133.0
+}

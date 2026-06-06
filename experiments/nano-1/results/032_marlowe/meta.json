@@ -1,0 +1,9 @@
+{
+  "vocab_size": 110,
+  "train_tokens": 1003581,
+  "val_tokens": 111510,
+  "source_name": "032_marlowe",
+  "best_val_loss": 1.5218,
+  "n_eval_points": 21,
+  "wall_clock_s": 146.0
+}

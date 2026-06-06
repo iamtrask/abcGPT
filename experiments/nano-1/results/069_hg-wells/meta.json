@@ -1,0 +1,9 @@
+{
+  "vocab_size": 96,
+  "train_tokens": 988813,
+  "val_tokens": 109869,
+  "source_name": "069_hg-wells",
+  "best_val_loss": 1.547795057296753,
+  "n_eval_points": 21,
+  "wall_clock_s": 162.0
+}

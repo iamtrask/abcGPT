@@ -1,0 +1,9 @@
+{
+  "vocab_size": 72,
+  "train_tokens": 53134,
+  "val_tokens": 5904,
+  "source_name": "003_tao-te-ching-legge",
+  "best_val_loss": 1.7636,
+  "n_eval_points": 21,
+  "wall_clock_s": 3623.8625135421753
+}

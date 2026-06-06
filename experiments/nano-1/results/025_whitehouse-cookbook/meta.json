@@ -1,0 +1,9 @@
+{
+  "vocab_size": 91,
+  "train_tokens": 1003696,
+  "val_tokens": 111522,
+  "source_name": "025_whitehouse-cookbook",
+  "best_val_loss": 1.5980876684188843,
+  "n_eval_points": 21,
+  "wall_clock_s": 3655.9620440006256
+}

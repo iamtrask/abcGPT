@@ -432,6 +432,6 @@ def download_results():
     print()
     print("Aggregating ...")
     subprocess.run(
-        ["python", "data/100_simple_voices/baselines/aggregate.py"],
+        ["python3", "data/100_simple_voices/baselines/aggregate.py"],
         check=True,
     )

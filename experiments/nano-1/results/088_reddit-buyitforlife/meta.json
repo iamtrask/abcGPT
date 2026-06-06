@@ -1,0 +1,9 @@
+{
+  "vocab_size": 222,
+  "train_tokens": 997278,
+  "val_tokens": 110809,
+  "source_name": "088_reddit-buyitforlife",
+  "best_val_loss": 1.311,
+  "n_eval_points": 21,
+  "wall_clock_s": 148.0
+}

@@ -1,0 +1,9 @@
+{
+  "vocab_size": 111,
+  "train_tokens": 993438,
+  "val_tokens": 110382,
+  "source_name": "079_tabloid-headlines",
+  "best_val_loss": 1.6197752952575684,
+  "n_eval_points": 21,
+  "wall_clock_s": 149.0
+}

@@ -1,0 +1,9 @@
+{
+  "vocab_size": 79,
+  "train_tokens": 111681,
+  "val_tokens": 12409,
+  "source_name": "002_bhagavad-gita-arnold",
+  "best_val_loss": 1.6488,
+  "n_eval_points": 21,
+  "wall_clock_s": 3687.879561662674
+}

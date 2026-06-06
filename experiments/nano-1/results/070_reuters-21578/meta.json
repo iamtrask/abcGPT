@@ -1,0 +1,9 @@
+{
+  "vocab_size": 84,
+  "train_tokens": 1003618,
+  "val_tokens": 111514,
+  "source_name": "070_reuters-21578",
+  "best_val_loss": 1.1459983587265015,
+  "n_eval_points": 21,
+  "wall_clock_s": 132.0
+}

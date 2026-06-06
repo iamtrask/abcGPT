@@ -1,0 +1,9 @@
+{
+  "vocab_size": 95,
+  "train_tokens": 1001087,
+  "val_tokens": 111232,
+  "source_name": "034_sophocles",
+  "best_val_loss": 1.5259,
+  "n_eval_points": 21,
+  "wall_clock_s": 131.0
+}

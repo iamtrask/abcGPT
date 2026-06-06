@@ -1,0 +1,9 @@
+{
+  "vocab_size": 142,
+  "train_tokens": 1002801,
+  "val_tokens": 111423,
+  "source_name": "083_stackexchange-cook",
+  "best_val_loss": 1.2835,
+  "n_eval_points": 21,
+  "wall_clock_s": 132.0
+}

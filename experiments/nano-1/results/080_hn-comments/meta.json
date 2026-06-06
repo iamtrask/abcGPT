@@ -1,0 +1,9 @@
+{
+  "vocab_size": 140,
+  "train_tokens": 1001488,
+  "val_tokens": 111277,
+  "source_name": "080_hn-comments",
+  "best_val_loss": 1.389856219291687,
+  "n_eval_points": 21,
+  "wall_clock_s": 147.0
+}

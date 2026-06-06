@@ -1,0 +1,9 @@
+{
+  "vocab_size": 106,
+  "train_tokens": 987376,
+  "val_tokens": 109709,
+  "source_name": "050_scotus-opinions",
+  "best_val_loss": 1.4285691976547241,
+  "n_eval_points": 21,
+  "wall_clock_s": 141.0
+}

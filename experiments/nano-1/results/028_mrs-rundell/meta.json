@@ -1,0 +1,9 @@
+{
+  "vocab_size": 80,
+  "train_tokens": 408924,
+  "val_tokens": 45436,
+  "source_name": "028_mrs-rundell",
+  "best_val_loss": 1.9181900024414062,
+  "n_eval_points": 21,
+  "wall_clock_s": 4367.291794300079
+}

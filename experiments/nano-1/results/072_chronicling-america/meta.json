@@ -1,0 +1,9 @@
+{
+  "vocab_size": 163,
+  "train_tokens": 987782,
+  "val_tokens": 109754,
+  "source_name": "072_chronicling-america",
+  "best_val_loss": 1.8094,
+  "n_eval_points": 21,
+  "wall_clock_s": 135.0
+}

@@ -1,0 +1,9 @@
+{
+  "vocab_size": 100,
+  "train_tokens": 1002172,
+  "val_tokens": 111353,
+  "source_name": "073_ap-wire-vintage",
+  "best_val_loss": 1.1704707145690918,
+  "n_eval_points": 21,
+  "wall_clock_s": 169.0
+}

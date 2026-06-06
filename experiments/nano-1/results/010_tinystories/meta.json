@@ -1,0 +1,9 @@
+{
+  "vocab_size": 77,
+  "train_tokens": 1002108,
+  "val_tokens": 111346,
+  "source_name": "010_tinystories",
+  "best_val_loss": 0.9005,
+  "n_eval_points": 21,
+  "wall_clock_s": 3500.190304040909
+}

@@ -1,0 +1,9 @@
+{
+  "vocab_size": 79,
+  "train_tokens": 269310,
+  "val_tokens": 29924,
+  "source_name": "014_andersen-fairy-tales",
+  "best_val_loss": 1.454074740409851,
+  "n_eval_points": 21,
+  "wall_clock_s": 3646.6226403713226
+}

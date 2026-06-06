@@ -1,0 +1,9 @@
+{
+  "vocab_size": 113,
+  "train_tokens": 995423,
+  "val_tokens": 110603,
+  "source_name": "021_fannie-farmer",
+  "best_val_loss": 0.7546903491020203,
+  "n_eval_points": 21,
+  "wall_clock_s": 3572.4234993457794
+}

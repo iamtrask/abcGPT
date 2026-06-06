@@ -1,0 +1,9 @@
+{
+  "vocab_size": 87,
+  "train_tokens": 974112,
+  "val_tokens": 108235,
+  "source_name": "062_mark-twain",
+  "best_val_loss": 1.5494825839996338,
+  "n_eval_points": 21,
+  "wall_clock_s": 132.0
+}

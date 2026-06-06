@@ -1,0 +1,9 @@
+{
+  "vocab_size": 106,
+  "train_tokens": 1003460,
+  "val_tokens": 111496,
+  "source_name": "060_lovecraft",
+  "best_val_loss": 1.46,
+  "n_eval_points": 21,
+  "wall_clock_s": 137.0
+}

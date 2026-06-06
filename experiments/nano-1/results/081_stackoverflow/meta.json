@@ -1,0 +1,9 @@
+{
+  "vocab_size": 236,
+  "train_tokens": 1001793,
+  "val_tokens": 111311,
+  "source_name": "081_stackoverflow",
+  "best_val_loss": 1.2285569906234741,
+  "n_eval_points": 21,
+  "wall_clock_s": 129.0
+}

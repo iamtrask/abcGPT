@@ -1,0 +1,9 @@
+{
+  "vocab_size": 200,
+  "train_tokens": 1001637,
+  "val_tokens": 111293,
+  "source_name": "047_wordsworth",
+  "best_val_loss": 1.4362,
+  "n_eval_points": 21,
+  "wall_clock_s": 125.0
+}

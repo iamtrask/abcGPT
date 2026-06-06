@@ -1,0 +1,9 @@
+{
+  "vocab_size": 92,
+  "train_tokens": 1003364,
+  "val_tokens": 111485,
+  "source_name": "057_un-treaties",
+  "best_val_loss": 1.1196,
+  "n_eval_points": 21,
+  "wall_clock_s": 131.0
+}

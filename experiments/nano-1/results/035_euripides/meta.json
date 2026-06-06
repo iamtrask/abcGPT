@@ -1,0 +1,9 @@
+{
+  "vocab_size": 146,
+  "train_tokens": 993339,
+  "val_tokens": 110371,
+  "source_name": "035_euripides",
+  "best_val_loss": 1.369675874710083,
+  "n_eval_points": 21,
+  "wall_clock_s": 174.0
+}

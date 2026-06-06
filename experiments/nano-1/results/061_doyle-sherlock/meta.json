@@ -1,0 +1,9 @@
+{
+  "vocab_size": 91,
+  "train_tokens": 982558,
+  "val_tokens": 109174,
+  "source_name": "061_doyle-sherlock",
+  "best_val_loss": 1.1183,
+  "n_eval_points": 21,
+  "wall_clock_s": 131.0
+}

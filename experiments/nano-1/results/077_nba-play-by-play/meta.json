@@ -1,0 +1,9 @@
+{
+  "vocab_size": 85,
+  "train_tokens": 968297,
+  "val_tokens": 107589,
+  "source_name": "077_nba-play-by-play",
+  "best_val_loss": 0.34225887060165405,
+  "n_eval_points": 21,
+  "wall_clock_s": 128.0
+}

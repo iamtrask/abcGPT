@@ -1,0 +1,9 @@
+{
+  "vocab_size": 101,
+  "train_tokens": 1003545,
+  "val_tokens": 111506,
+  "source_name": "020_beeton-household",
+  "best_val_loss": 1.2125,
+  "n_eval_points": 21,
+  "wall_clock_s": 3505.305887937546
+}

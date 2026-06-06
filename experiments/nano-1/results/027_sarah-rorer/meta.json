@@ -1,0 +1,9 @@
+{
+  "vocab_size": 95,
+  "train_tokens": 392553,
+  "val_tokens": 43618,
+  "source_name": "027_sarah-rorer",
+  "best_val_loss": 1.119753360748291,
+  "n_eval_points": 21,
+  "wall_clock_s": 3993.9862926006317
+}
