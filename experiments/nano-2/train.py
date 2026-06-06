@@ -188,6 +188,12 @@ def train_with_logging(
     warmup_mn=0,
     balance_penalty=False,
     lambda_balance=1.0,
+    boundary_migration=False,
+    migration_interval=100,
+    migration_step=0.01,
+    migration_threshold=0.02,
+    migration_warmup=500,
+    ema_alpha=0.99,
 ):
     """Same logic as gated_gpt_tent.train_gated, but writes a structured JSONL log.
 
@@ -319,6 +325,10 @@ def train_with_logging(
 
     n_shake = 0
     n_ts = 0
+    # Per-cohort loss EMAs for boundary-migration mode
+    loss_ema_shake = None  # set on first shake batch
+    loss_ema_ts = None
+    n_migrations = 0       # diagnostic counter
     model.train()
     t_start = time.time()
     t_log = t_start
@@ -382,6 +392,30 @@ def train_with_logging(
         optimizer.step()
         optimizer.zero_grad(set_to_none=True)
 
+        # ------------------------------------------------------------------
+        # Boundary-migration: control-loop step (outside gradient flow).
+        # Updates per-cohort training-loss EMAs; periodically nudges the
+        # boundary toward giving capacity to the higher-loss cohort.
+        # ------------------------------------------------------------------
+        if boundary_migration and not balance_penalty:
+            train_loss_val = float(ce_loss.item())
+            if cohort == 'shake':
+                loss_ema_shake = train_loss_val if loss_ema_shake is None else \
+                                 ema_alpha * loss_ema_shake + (1 - ema_alpha) * train_loss_val
+            elif cohort == 'ts':
+                loss_ema_ts = train_loss_val if loss_ema_ts is None else \
+                              ema_alpha * loss_ema_ts + (1 - ema_alpha) * train_loss_val
+
+            if (it + 1) % migration_interval == 0 and (it + 1) > migration_warmup \
+               and loss_ema_shake is not None and loss_ema_ts is not None:
+                delta = loss_ema_shake - loss_ema_ts
+                if abs(delta) > migration_threshold:
+                    # delta > 0 → shake harder → boundary DOWN (more neurons above boundary → more shake-spec)
+                    # delta < 0 → ts harder → boundary UP (opposite)
+                    shift_sign = -1.0 if delta > 0 else +1.0
+                    model.shift_all_boundaries(shift_sign * migration_step)
+                    n_migrations += 1
+
         if (it + 1) % log_interval == 0:
             dt = time.time() - t_log
             train_loss = float(ce_loss.item())
@@ -420,7 +454,7 @@ def train_with_logging(
             v_ts_5 = estimate_val(get_ts_val, alpha=0.5)
             v_ts_0 = estimate_val(get_ts_val, alpha=0.0)
             mn_snap = snapshot_m_n_distribution(model, m_n_init_snapshot=m_n_init) if not ungated else None
-            emit({
+            eval_rec = {
                 'type': 'eval',
                 'iter': it + 1,
                 't_elapsed_s': time.time() - t_start,
@@ -431,7 +465,13 @@ def train_with_logging(
                 'm_n_snapshot': mn_snap,
                 'n_shake': n_shake,
                 'n_ts': n_ts,
-            })
+            }
+            if boundary_migration:
+                eval_rec['boundaries'] = model.get_boundaries()
+                eval_rec['loss_ema_shake'] = loss_ema_shake
+                eval_rec['loss_ema_ts'] = loss_ema_ts
+                eval_rec['n_migrations'] = n_migrations
+            emit(eval_rec)
             print(f"  >>> step {it+1}: shake@a=1.0={v_sh_1:.3f}  ts@a=0.0={v_ts_0:.3f}  "
                   f"shake@a=0.5={v_sh_5:.3f}  ts@a=0.5={v_ts_5:.3f}  "
                   f"corpus split so far: {n_shake} shake / {n_ts} ts", flush=True)
@@ -453,9 +493,13 @@ def train_with_logging(
 # ---------------------------------------------------------------------------
 def main():
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    p.add_argument('--variant', choices=['ungated', 'fixed-mn', 'trainable-mn', 'balance-penalty'], required=True,
+    p.add_argument('--variant',
+                   choices=['ungated', 'fixed-mn', 'trainable-mn', 'balance-penalty', 'boundary-migration'],
+                   required=True,
                    help='ungated = vanilla GPT; fixed-mn = original nano-2; trainable-mn = sigmoid-logits masks; '
-                        'balance-penalty = fixed-mn + dual-batch + |loss_shake - loss_ts| penalty')
+                        'balance-penalty = fixed-mn + dual-batch + |loss_shake - loss_ts| penalty; '
+                        'boundary-migration = each neuron has a permanent rank, single boundary scalar moves '
+                        'based on per-cohort loss EMA (control-system, no gradient on masks)')
     p.add_argument('--variant-name', required=True,
                    help='subdir name under experiments/nano-2/results/<variant-name>/')
     p.add_argument('--data-dir', default=str(REPO_ROOT / 'data/shakespeare_tinystories_char'))
@@ -493,6 +537,19 @@ def main():
                    help='(trainable-mn only) freeze m_n for first N iters')
     p.add_argument('--lambda-balance', type=float, default=1.0,
                    help='(balance-penalty only) weight on the |loss_shake - loss_ts| term in the combined loss')
+    # boundary-migration knobs
+    p.add_argument('--boundary-sharpness', type=float, default=10.0,
+                   help='(boundary-migration) sharpness of sigmoid transition from rank-space to m_n. higher = sharper')
+    p.add_argument('--migration-interval', type=int, default=100,
+                   help='(boundary-migration) check imbalance + maybe shift boundary every N iters')
+    p.add_argument('--migration-step', type=float, default=0.01,
+                   help='(boundary-migration) boundary shift magnitude per migration event')
+    p.add_argument('--migration-threshold', type=float, default=0.02,
+                   help='(boundary-migration) only shift if |ema_shake - ema_ts| > this (nats)')
+    p.add_argument('--migration-warmup', type=int, default=500,
+                   help='(boundary-migration) skip migration for the first N iters (let weights settle)')
+    p.add_argument('--ema-alpha', type=float, default=0.99,
+                   help='(boundary-migration) exponential moving average factor for per-cohort loss tracking')
     # Device + smoke
     p.add_argument('--device', default='cuda' if torch.cuda.is_available() else 'cpu')
     p.add_argument('--amp-dtype', default='bfloat16', choices=['bfloat16', 'float16', 'float32'])
@@ -557,6 +614,8 @@ def main():
             n_embd=args.n_embd, block_size=args.block_size, dropout=args.dropout,
             mask_seed=args.mask_seed, tent_narrowness=args.span,
             trainable_masks=(args.variant == 'trainable-mn'),
+            boundary_mode=(args.variant == 'boundary-migration'),
+            boundary_sharpness=args.boundary_sharpness,
         )
         model = GatedGPT(cfg).to(args.device)
         ungated = False
@@ -583,6 +642,12 @@ def main():
         warmup_mn=args.warmup_mn,
         balance_penalty=(args.variant == 'balance-penalty'),
         lambda_balance=args.lambda_balance,
+        boundary_migration=(args.variant == 'boundary-migration'),
+        migration_interval=args.migration_interval,
+        migration_step=args.migration_step,
+        migration_threshold=args.migration_threshold,
+        migration_warmup=args.migration_warmup,
+        ema_alpha=args.ema_alpha,
     )
 
     # Save final summary + final m_n snapshot if applicable

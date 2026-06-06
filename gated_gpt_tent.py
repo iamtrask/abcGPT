@@ -164,6 +164,15 @@ class GatedGPTConfig:
                                    # via sigmoid(logits) so they stay in [0,1] under gradient updates.
                                    # Caller is expected to put mask logits in a separate optimizer
                                    # param group with a much smaller LR (see GatedGPT.m_n_logits()).
+    boundary_mode: bool = False    # when True, each neuron has a permanent `rank` (Beta-sampled at init)
+                                   # and m_n is computed every forward as sigmoid((rank - boundary) * sharpness).
+                                   # A single mutable scalar `boundary` controls the cohort split for each mask.
+                                   # Used by the "boundary-migration" variant: control-loop training adjusts
+                                   # `boundary` based on per-cohort loss imbalance, NOT via gradient. Neurons
+                                   # near the boundary cross back and forth as it moves; their identity is
+                                   # preserved (same rank forever). This is the consistency-preserving version
+                                   # of trainable_masks — same neurons cross the boundary in either direction.
+    boundary_sharpness: float = 10.0  # sharpness of sigmoid transition. higher = sharper specialist/halfsie split.
 
 
 def _beta_to_logit(m, eps=1e-4):
@@ -178,7 +187,8 @@ def _beta_to_logit(m, eps=1e-4):
 
 
 class GatedSelfAttention(nn.Module):
-    def __init__(self, config: GatedGPTConfig, layer_idx: int, M_embd_or_logits: torch.Tensor):
+    def __init__(self, config: GatedGPTConfig, layer_idx: int, M_embd_or_logits_or_ranks: torch.Tensor,
+                 M_embd_boundary: torch.Tensor = None):
         super().__init__()
         assert config.n_embd % config.n_head == 0
         self.c_attn = nn.Linear(config.n_embd, 3 * config.n_embd, bias=config.bias)
@@ -190,21 +200,37 @@ class GatedSelfAttention(nn.Module):
         self.dropout = config.dropout
         self.narrowness = config.tent_narrowness
         self.trainable_masks = config.trainable_masks
+        self.boundary_mode = config.boundary_mode
+        self.boundary_sharpness = config.boundary_sharpness
         head_init = sample_beta_half_mask((config.n_head,), seed=config.mask_seed + 100 * layer_idx + 1)
-        if config.trainable_masks:
+        if config.boundary_mode:
+            # Each block's head mask has its own rank vector and its own boundary scalar.
+            # Boundaries can be tied across layers from the outside (see GatedGPT.__init__).
+            self.register_buffer('M_head_ranks', head_init)
+            self.register_buffer('M_head_boundary', torch.tensor(0.5))
+            self.register_buffer('M_embd_ranks', M_embd_or_logits_or_ranks)  # shared from root
+            # M_embd_boundary is shared with root via direct attribute (registered as buffer at root only)
+            self.M_embd_boundary = M_embd_boundary
+        elif config.trainable_masks:
             self.M_head_logits = nn.Parameter(_beta_to_logit(head_init))
-            # M_embd_or_logits is a Parameter owned by GatedGPT root; share via weight-tying.
-            # Same pattern as wte.weight = lm_head.weight in nanoGPT — pytorch handles dedup.
-            self.M_embd_logits = M_embd_or_logits
+            self.M_embd_logits = M_embd_or_logits_or_ranks
         else:
             self.register_buffer('M_head', head_init)
-            self.register_buffer('M_embd', M_embd_or_logits)
+            self.register_buffer('M_embd', M_embd_or_logits_or_ranks)
 
     def _M_head(self):
-        return torch.sigmoid(self.M_head_logits) if self.trainable_masks else self.M_head
+        if self.boundary_mode:
+            return torch.sigmoid((self.M_head_ranks - self.M_head_boundary) * self.boundary_sharpness)
+        if self.trainable_masks:
+            return torch.sigmoid(self.M_head_logits)
+        return self.M_head
 
     def _M_embd(self):
-        return torch.sigmoid(self.M_embd_logits) if self.trainable_masks else self.M_embd
+        if self.boundary_mode:
+            return torch.sigmoid((self.M_embd_ranks - self.M_embd_boundary) * self.boundary_sharpness)
+        if self.trainable_masks:
+            return torch.sigmoid(self.M_embd_logits)
+        return self.M_embd
 
     def forward(self, x: torch.Tensor, alpha: float, corpus) -> torch.Tensor:
         B, T, C = x.size()
@@ -225,26 +251,42 @@ class GatedSelfAttention(nn.Module):
 
 
 class GatedMLP(nn.Module):
-    def __init__(self, config: GatedGPTConfig, layer_idx: int, M_embd_or_logits: torch.Tensor):
+    def __init__(self, config: GatedGPTConfig, layer_idx: int, M_embd_or_logits_or_ranks: torch.Tensor,
+                 M_embd_boundary: torch.Tensor = None):
         super().__init__()
         self.c_fc = nn.Linear(config.n_embd, 4 * config.n_embd, bias=config.bias)
         self.c_proj = nn.Linear(4 * config.n_embd, config.n_embd, bias=config.bias)
         self.dropout = nn.Dropout(config.dropout)
         self.narrowness = config.tent_narrowness
         self.trainable_masks = config.trainable_masks
+        self.boundary_mode = config.boundary_mode
+        self.boundary_sharpness = config.boundary_sharpness
         inner_init = sample_beta_half_mask((4 * config.n_embd,), seed=config.mask_seed + 100 * layer_idx + 2)
-        if config.trainable_masks:
+        if config.boundary_mode:
+            self.register_buffer('M_inner_ranks', inner_init)
+            self.register_buffer('M_inner_boundary', torch.tensor(0.5))
+            self.register_buffer('M_embd_ranks', M_embd_or_logits_or_ranks)
+            self.M_embd_boundary = M_embd_boundary
+        elif config.trainable_masks:
             self.M_inner_logits = nn.Parameter(_beta_to_logit(inner_init))
-            self.M_embd_logits = M_embd_or_logits  # shared Parameter from GatedGPT root
+            self.M_embd_logits = M_embd_or_logits_or_ranks
         else:
             self.register_buffer('M_inner', inner_init)
-            self.register_buffer('M_embd', M_embd_or_logits)
+            self.register_buffer('M_embd', M_embd_or_logits_or_ranks)
 
     def _M_inner(self):
-        return torch.sigmoid(self.M_inner_logits) if self.trainable_masks else self.M_inner
+        if self.boundary_mode:
+            return torch.sigmoid((self.M_inner_ranks - self.M_inner_boundary) * self.boundary_sharpness)
+        if self.trainable_masks:
+            return torch.sigmoid(self.M_inner_logits)
+        return self.M_inner
 
     def _M_embd(self):
-        return torch.sigmoid(self.M_embd_logits) if self.trainable_masks else self.M_embd
+        if self.boundary_mode:
+            return torch.sigmoid((self.M_embd_ranks - self.M_embd_boundary) * self.boundary_sharpness)
+        if self.trainable_masks:
+            return torch.sigmoid(self.M_embd_logits)
+        return self.M_embd
 
     def forward(self, x: torch.Tensor, alpha: float, corpus) -> torch.Tensor:
         h = F.gelu(self.c_fc(x))                                                            # (B, T, 4D)
@@ -255,12 +297,12 @@ class GatedMLP(nn.Module):
 
 
 class GatedBlock(nn.Module):
-    def __init__(self, config: GatedGPTConfig, layer_idx: int, M_embd: torch.Tensor):
+    def __init__(self, config: GatedGPTConfig, layer_idx: int, M_embd, M_embd_boundary=None):
         super().__init__()
         self.ln_1 = nn.LayerNorm(config.n_embd, bias=config.bias)
-        self.attn = GatedSelfAttention(config, layer_idx, M_embd)
+        self.attn = GatedSelfAttention(config, layer_idx, M_embd, M_embd_boundary)
         self.ln_2 = nn.LayerNorm(config.n_embd, bias=config.bias)
-        self.mlp = GatedMLP(config, layer_idx, M_embd)
+        self.mlp = GatedMLP(config, layer_idx, M_embd, M_embd_boundary)
 
     def forward(self, x: torch.Tensor, alpha: float, corpus) -> torch.Tensor:
         x = x + self.attn(self.ln_1(x), alpha, corpus)
@@ -275,12 +317,21 @@ class GatedGPT(nn.Module):
         self.narrowness = config.tent_narrowness
         self.trainable_masks = config.trainable_masks
 
+        self.boundary_mode = config.boundary_mode
+        self.boundary_sharpness = config.boundary_sharpness
+
         # Global per-channel mask for the residual-stream (n_embd) dimension.
         # Sampled once with a layer-independent seed so re-runs reproduce it.
         # Shared across every module that touches the residual stream
         # (embeddings, every block's c_proj output, and ln_f output before lm_head).
         M_embd_init = sample_beta_half_mask((config.n_embd,), seed=config.mask_seed)
-        if config.trainable_masks:
+        shared_boundary = None
+        if config.boundary_mode:
+            self.register_buffer('M_embd_ranks', M_embd_init)
+            self.register_buffer('M_embd_boundary', torch.tensor(0.5))
+            shared = M_embd_init
+            shared_boundary = self.M_embd_boundary  # tensor reference shared with blocks
+        elif config.trainable_masks:
             self.M_embd_logits = nn.Parameter(_beta_to_logit(M_embd_init))
             shared = self.M_embd_logits
         else:
@@ -291,7 +342,7 @@ class GatedGPT(nn.Module):
             wte=nn.Embedding(config.vocab_size, config.n_embd),
             wpe=nn.Embedding(config.block_size, config.n_embd),
             drop=nn.Dropout(config.dropout),
-            h=nn.ModuleList([GatedBlock(config, i, shared) for i in range(config.n_layer)]),
+            h=nn.ModuleList([GatedBlock(config, i, shared, shared_boundary) for i in range(config.n_layer)]),
             ln_f=nn.LayerNorm(config.n_embd, bias=config.bias),
         ))
         self.lm_head = nn.Linear(config.n_embd, config.vocab_size, bias=False)
@@ -306,7 +357,36 @@ class GatedGPT(nn.Module):
                 torch.nn.init.normal_(p, mean=0.0, std=0.02 / math.sqrt(2 * config.n_layer))
 
     def _M_embd(self):
-        return torch.sigmoid(self.M_embd_logits) if self.trainable_masks else self.M_embd
+        if self.boundary_mode:
+            return torch.sigmoid((self.M_embd_ranks - self.M_embd_boundary) * self.boundary_sharpness)
+        if self.trainable_masks:
+            return torch.sigmoid(self.M_embd_logits)
+        return self.M_embd
+
+    def shift_all_boundaries(self, delta: float):
+        """Move ALL mask boundaries (M_embd, every layer's M_head and M_inner) by `delta`.
+
+        Use in the boundary-migration training loop: when shake_loss > ts_loss, call with
+        delta < 0 (boundary moves down → more neurons end up above boundary → more shake-spec).
+        Reverse sign when ts is the harder cohort.
+        """
+        if not self.boundary_mode:
+            raise RuntimeError("shift_all_boundaries called but model is not in boundary_mode")
+        with torch.no_grad():
+            self.M_embd_boundary += delta  # also seen by blocks since they share the reference
+            for block in self.transformer.h:
+                block.attn.M_head_boundary += delta
+                block.mlp.M_inner_boundary += delta
+
+    def get_boundaries(self):
+        """Return a dict of current boundary values (for logging)."""
+        if not self.boundary_mode:
+            return None
+        out = {'M_embd': float(self.M_embd_boundary.item())}
+        for i, block in enumerate(self.transformer.h):
+            out[f'layer_{i}_M_head']  = float(block.attn.M_head_boundary.item())
+            out[f'layer_{i}_M_inner'] = float(block.mlp.M_inner_boundary.item())
+        return out
 
 
     def _init_weights(self, module):
