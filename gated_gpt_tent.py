@@ -293,9 +293,16 @@ class GatedSelfAttention(nn.Module):
             # then learnable scores assign which head gets which slot in that distribution.
             self.register_buffer('M_head_target', torch.sort(head_init).values)
             self.M_head_scores = nn.Parameter(torch.randn(config.n_head) * 0.01)
-            # M_embd target+scores are shared from root (passed in)
+            # M_embd scores: shared with root via nn.Parameter (Module.__setattr__ auto-registers
+            # Parameters; both root and block see the same Parameter object).
             self.M_embd_scores = M_embd_or_logits_or_ranks  # nn.Parameter from root
-            self.M_embd_target = M_embd_target               # buffer ref from root
+            # M_embd target: must register_buffer to get .to(device) movement. Plain attribute
+            # assignment of a Tensor (`self.M_embd_target = M_embd_target`) silently fails to
+            # move to CUDA — the attribute stays pointing at the OLD CPU tensor — causing
+            # "Expected all tensors on same device" at first forward. (The boundary_mode code
+            # has the same pattern with a 0-dim scalar tensor that PyTorch implicitly broadcasts
+            # across devices, so it gets away with it.)
+            self.register_buffer('M_embd_target', M_embd_target)
             # anneal_t: per-module buffer, updated together via GatedGPT.set_learn_assign_anneal()
             self.register_buffer('learn_assign_anneal_t', torch.tensor(1.0))
         elif config.trainable_masks:
@@ -362,8 +369,9 @@ class GatedMLP(nn.Module):
         elif config.learned_assignment:
             self.register_buffer('M_inner_target', torch.sort(inner_init).values)
             self.M_inner_scores = nn.Parameter(torch.randn(4 * config.n_embd) * 0.01)
-            self.M_embd_scores = M_embd_or_logits_or_ranks  # nn.Parameter from root
-            self.M_embd_target = M_embd_target               # buffer ref from root
+            self.M_embd_scores = M_embd_or_logits_or_ranks  # nn.Parameter from root (auto-shares)
+            # See GatedSelfAttention for why this MUST be register_buffer, not attr-assign.
+            self.register_buffer('M_embd_target', M_embd_target)
             self.register_buffer('learn_assign_anneal_t', torch.tensor(1.0))
         elif config.trainable_masks:
             self.M_inner_logits = nn.Parameter(_beta_to_logit(inner_init))
