@@ -224,6 +224,40 @@ def train_with_logging(
     # Capture m_n init snapshot for drift tracking
     m_n_init = capture_m_n_init(model) if not ungated else None
 
+    # Capture learn-assign scores at init (for drift + rank-correlation diagnostics).
+    # None if not in learn-assign mode.
+    la_scores_init = None
+    if not ungated and getattr(model, 'learned_assignment', False):
+        la_scores_init = {'M_embd': model.M_embd_scores.detach().clone().cpu()}
+        for i, blk in enumerate(model.transformer.h):
+            la_scores_init[f'M_head_{i}'] = blk.attn.M_head_scores.detach().clone().cpu()
+            la_scores_init[f'M_inner_{i}'] = blk.mlp.M_inner_scores.detach().clone().cpu()
+
+    def _la_diagnostics():
+        """Snapshot anneal_t, average score drift (L2), and rank correlation
+        with init across all learn-assign mask types. Cheap (eval-time only)."""
+        if la_scores_init is None:
+            return None
+        out = {'anneal_t': float(model.learn_assign_anneal_t.item())}
+        drifts, rank_corrs = [], []
+        for k, init in la_scores_init.items():
+            if k == 'M_embd':
+                cur = model.M_embd_scores.detach().cpu()
+            elif k.startswith('M_head_'):
+                cur = model.transformer.h[int(k.split('_')[2])].attn.M_head_scores.detach().cpu()
+            else:  # M_inner_
+                cur = model.transformer.h[int(k.split('_')[2])].mlp.M_inner_scores.detach().cpu()
+            drift = ((cur - init).norm() / (init.norm() + 1e-9)).item()
+            drifts.append(drift)
+            if cur.numel() > 1:
+                cur_r = torch.argsort(torch.argsort(cur)).float()
+                init_r = torch.argsort(torch.argsort(init)).float()
+                rc = torch.corrcoef(torch.stack([cur_r, init_r]))[0, 1].item()
+                rank_corrs.append(rc)
+        out['avg_score_drift_L2'] = sum(drifts) / max(1, len(drifts))
+        out['avg_rank_corr_init'] = sum(rank_corrs) / max(1, len(rank_corrs))
+        return out
+
     emit({
         'type': 'config',
         'n_iters': n_iters,
@@ -544,10 +578,18 @@ def train_with_logging(
                 eval_rec['loss_ema_shake'] = loss_ema_shake
                 eval_rec['loss_ema_ts'] = loss_ema_ts
                 eval_rec['n_migrations'] = n_migrations
+            la_diag = _la_diagnostics()
+            if la_diag is not None:
+                eval_rec['la_diag'] = la_diag
             emit(eval_rec)
+            la_suffix = ''
+            if la_diag is not None:
+                la_suffix = (f"  | la: t={la_diag['anneal_t']:.3f} "
+                             f"drift={la_diag['avg_score_drift_L2']:.3f} "
+                             f"rank_corr={la_diag['avg_rank_corr_init']:+.3f}")
             print(f"  >>> step {it+1}: shake@a=1.0={v_sh_1:.3f}  ts@a=0.0={v_ts_0:.3f}  "
                   f"shake@a=0.5={v_sh_5:.3f}  ts@a=0.5={v_ts_5:.3f}  "
-                  f"corpus split so far: {n_shake} shake / {n_ts} ts", flush=True)
+                  f"corpus split so far: {n_shake} shake / {n_ts} ts{la_suffix}", flush=True)
 
     total_s = time.time() - t_start
     emit({
