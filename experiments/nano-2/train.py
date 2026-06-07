@@ -196,6 +196,9 @@ def train_with_logging(
     ema_alpha=0.99,
     migration_step_decay=False,
     migration_boundary_cap=0.5,
+    learn_assign_anneal=False,
+    learn_assign_anneal_start=0.05,
+    learn_assign_anneal_end=1.0,
 ):
     """Same logic as gated_gpt_tent.train_gated, but writes a structured JSONL log.
 
@@ -241,9 +244,12 @@ def train_with_logging(
     })
 
     # Identify mask logit params separately so they get a different LR + no weight decay.
+    # Covers BOTH `trainable_masks` (sigmoid(logits)) AND `learned_assignment` (per-neuron
+    # scores driving hard-assignment-with-STE).
     trainable_masks = (not ungated) and getattr(model, 'trainable_masks', False)
+    learned_assignment = (not ungated) and getattr(model, 'learned_assignment', False)
     mask_logit_param_ids = set()
-    if trainable_masks:
+    if trainable_masks or learned_assignment:
         for p in model.mask_logit_params():
             mask_logit_param_ids.add(id(p))
 
@@ -337,6 +343,12 @@ def train_with_logging(
 
     for it in range(n_iters):
         cur_lr = apply_lr(it)
+
+        # learn-assign anneal schedule — exponential ramp from start → end over n_iters.
+        if learn_assign_anneal and getattr(model, 'learned_assignment', False):
+            progress = it / max(1, n_iters - 1)
+            t_val = learn_assign_anneal_start * (learn_assign_anneal_end / learn_assign_anneal_start) ** progress
+            model.set_learn_assign_anneal(t_val)
 
         balance_pen = None  # populated only in balance-penalty mode
         var_pen = None      # populated only in trainable-mn mode
@@ -585,6 +597,22 @@ def main():
                         '0.5 = U-shaped (default, most neurons hard-specialized), '
                         '1.0 = uniform, 2.0 = bell-shaped (most neurons mixed). '
                         'Used by the perturbation sweep to probe how mask distribution shape affects loss.')
+    p.add_argument('--learned-assignment', action='store_true',
+                   help='(learn-assign variant) Activate learned-assignment masks. The mask DISTRIBUTION '
+                        'is committed to sorted Beta(α, α) (target_values); a per-neuron learnable score '
+                        'decides which neuron gets which slot in the distribution, via hard argsort + STE. '
+                        'Tests "let the model pick which neurons are which, constrain the aggregate shape." '
+                        'Use with --variant fixed-mn (no migration loop) — learned_assignment is its own '
+                        'parametrization branch in the model code.')
+    p.add_argument('--learn-assign-anneal', action='store_true',
+                   help='(learn-assign) Anneal anneal_t from --start to --end over n_iters (exponential). '
+                        'Forces the model to start with all-mixed targets and gradually commit to the '
+                        'full Beta-shape distribution. Lets scores learn the ranking during the mixed '
+                        'phase, then commits assignments as targets differentiate.')
+    p.add_argument('--learn-assign-anneal-start', type=float, default=0.05,
+                   help='(learn-assign anneal) Starting anneal_t value (must be > 0 to keep gradient signal).')
+    p.add_argument('--learn-assign-anneal-end', type=float, default=1.0,
+                   help='(learn-assign anneal) Final anneal_t value (1.0 = full target shape).')
     # Device + smoke
     p.add_argument('--device', default='cuda' if torch.cuda.is_available() else 'cpu')
     p.add_argument('--amp-dtype', default='bfloat16', choices=['bfloat16', 'float16', 'float32'])
@@ -652,6 +680,7 @@ def main():
             boundary_mode=(args.variant == 'boundary-migration'),
             boundary_sharpness=args.boundary_sharpness,
             rank_beta_alpha=args.rank_beta_alpha,
+            learned_assignment=args.learned_assignment,
         )
         model = GatedGPT(cfg).to(args.device)
         ungated = False
@@ -694,6 +723,9 @@ def main():
         ema_alpha=args.ema_alpha,
         migration_step_decay=args.migration_step_decay,
         migration_boundary_cap=args.migration_boundary_cap,
+        learn_assign_anneal=args.learn_assign_anneal,
+        learn_assign_anneal_start=args.learn_assign_anneal_start,
+        learn_assign_anneal_end=args.learn_assign_anneal_end,
     )
 
     # Save final summary + final m_n snapshot if applicable

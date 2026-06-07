@@ -154,6 +154,33 @@ SWEEP_DEFAULT = [
     ("pert-beta-bell",
      "--variant boundary-migration --n-iters 10000 --span 1.0 --seed 1337 --eval-interval 500 --log-interval 250 --initial-boundary 0.5 --migration-step 0 --migration-warmup 999999 --boundary-sharpness 10 --rank-beta-alpha 2.0"),
 
+    # LEARN-ASSIGN SWEEP: same perturbation axes as pert-*, but the mask is
+    # learned-assignment-with-annealing. The TARGET DISTRIBUTION shape stays
+    # whatever Beta(α, α) we pick; per-neuron learnable scores decide WHICH
+    # neuron gets which slot in that distribution. anneal_t schedules from
+    # 0.05 → 1.0 exponentially over n_iters: targets start nearly-collapsed
+    # (all m_n ≈ 0.5, model is essentially ungated) and unmix into the
+    # committed Beta shape by end of training. Scores learn ranking during
+    # the mixed phase; commitments crystallize as targets differentiate.
+    #
+    # Apples-to-apples with the corresponding pert-* variant where possible
+    # (matching narrowness + rank α). Sharpness and boundary perturbations
+    # don't apply to learn-assign — those are boundary_mode parameters.
+    ("la-base",
+     "--variant fixed-mn --n-iters 10000 --span 1.0 --seed 1337 --eval-interval 500 --log-interval 250 --learned-assignment --learn-assign-anneal --rank-beta-alpha 0.5"),
+
+    ("la-narrow-loose",
+     "--variant fixed-mn --n-iters 10000 --span 2.0 --seed 1337 --eval-interval 500 --log-interval 250 --learned-assignment --learn-assign-anneal --rank-beta-alpha 0.5"),
+
+    ("la-narrow-tight",
+     "--variant fixed-mn --n-iters 10000 --span 0.5 --seed 1337 --eval-interval 500 --log-interval 250 --learned-assignment --learn-assign-anneal --rank-beta-alpha 0.5"),
+
+    ("la-beta-uniform",
+     "--variant fixed-mn --n-iters 10000 --span 1.0 --seed 1337 --eval-interval 500 --log-interval 250 --learned-assignment --learn-assign-anneal --rank-beta-alpha 1.0"),
+
+    ("la-beta-bell",
+     "--variant fixed-mn --n-iters 10000 --span 1.0 --seed 1337 --eval-interval 500 --log-interval 250 --learned-assignment --learn-assign-anneal --rank-beta-alpha 2.0"),
+
     ("fixed-mn-span0.3",
      "--variant fixed-mn --n-iters 10000 --span 0.3 --alpha-dist beta_half"),
 

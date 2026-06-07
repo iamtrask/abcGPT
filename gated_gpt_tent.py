@@ -152,8 +152,16 @@ def gate_with_corpus(x, M, alpha, corpus, narrowness=1.0):
     If `corpus is None` (or x doesn't need grad), reduces to a plain multiply
     with the smooth tent-gate (used at eval time so we don't pay for
     autograd-function overhead).
+
+    If `M.requires_grad` is True (trainable_masks or learned_assignment), use
+    the plain smooth gate so gradient flows through BOTH x AND M. The
+    corpus-routed straight-through estimator was designed for buffered masks
+    that don't need data-loss gradient — using it for learnable masks would
+    silently zero their gradient (M's backward returns None there).
     """
     if corpus is None or not torch.is_grad_enabled():
+        return x * _smooth_tent(alpha, M, narrowness)
+    if M.requires_grad:
         return x * _smooth_tent(alpha, M, narrowness)
     return _CorpusRoutedGate.apply(x, M, alpha, corpus, narrowness)
 
@@ -188,6 +196,49 @@ class GatedGPTConfig:
     boundary_sharpness: float = 10.0  # sharpness of sigmoid transition. higher = sharper specialist/halfsie split.
     rank_beta_alpha: float = 0.5      # symmetric Beta(α, α) shape parameter for rank/mask sampling.
                                       # 0.5 = U-shape (default), 1.0 = uniform, 2.0 = bell.
+    learned_assignment: bool = False  # When True: masks via hard-assignment-with-STE. Sample target_values
+                                      # (sorted Beta(α, α)) and maintain per-neuron learnable scores. Forward:
+                                      # neuron with i-th rank score gets i-th target value (distribution
+                                      # exactly preserved). Backward: STE — ∂L/∂m flows to scores as identity.
+                                      # Lets the model decide which neurons go where while the overall
+                                      # mask distribution stays fixed at the target shape. Mutually
+                                      # exclusive with boundary_mode and trainable_masks.
+
+
+def learn_assign_mask(scores, target_values, anneal_t=1.0):
+    """Hard distribution-preserving assignment with straight-through estimator.
+
+    Forward:
+        target_eff = 0.5 + anneal_t * (target_values − 0.5)
+        Neuron at the i-th lowest score gets target_eff[i]. The resulting m_n
+        distribution is EXACTLY target_eff — every value appears once, no
+        more, no less. Which neuron gets which value is determined by `scores`.
+
+        anneal_t = 1.0 (default): full target shape (committed).
+        anneal_t = 0.0:           every target collapses to 0.5 (all neurons
+                                  fully mixed, no specialization possible).
+        Anneal 0 → 1 over training to "force the overall distribution to
+        unmix, while the model learns which neurons should go where."
+
+    Backward:
+        Hard assignment is non-differentiable (argsort). We use the
+        straight-through estimator: ∂L/∂m flows through to scores as if the
+        assignment were identity. So the optimizer treats the mask value
+        gradient as a "push my score up/down" signal on each neuron.
+
+    Args:
+        scores:        (n,) learnable tensor. Higher score = higher m_n.
+        target_values: (n,) sorted, fixed. The committed distribution shape.
+        anneal_t:      scalar in [0, 1]. Multiplier on deviation from 0.5.
+
+    Returns:
+        m: (n,) the mask values. Has the gradient of scores via STE.
+    """
+    target_eff = 0.5 + anneal_t * (target_values - 0.5)
+    sorted_idx = torch.argsort(scores)             # rank ordering
+    m_hard = torch.empty_like(target_eff)
+    m_hard[sorted_idx] = target_eff                # neuron at rank-i gets target_eff[i]
+    return scores + (m_hard - scores).detach()     # STE: forward=m_hard, grad=scores
 
 
 def _beta_to_logit(m, eps=1e-4):
@@ -203,7 +254,7 @@ def _beta_to_logit(m, eps=1e-4):
 
 class GatedSelfAttention(nn.Module):
     def __init__(self, config: GatedGPTConfig, layer_idx: int, M_embd_or_logits_or_ranks: torch.Tensor,
-                 M_embd_boundary: torch.Tensor = None):
+                 M_embd_boundary: torch.Tensor = None, M_embd_target: torch.Tensor = None):
         super().__init__()
         assert config.n_embd % config.n_head == 0
         self.c_attn = nn.Linear(config.n_embd, 3 * config.n_embd, bias=config.bias)
@@ -217,6 +268,7 @@ class GatedSelfAttention(nn.Module):
         self.trainable_masks = config.trainable_masks
         self.boundary_mode = config.boundary_mode
         self.boundary_sharpness = config.boundary_sharpness
+        self.learned_assignment = config.learned_assignment
         head_init = sample_beta_half_mask((config.n_head,), seed=config.mask_seed + 100 * layer_idx + 1, alpha=config.rank_beta_alpha)
         if config.boundary_mode:
             # Each block's head mask has its own rank vector and its own boundary scalar.
@@ -226,6 +278,16 @@ class GatedSelfAttention(nn.Module):
             self.register_buffer('M_embd_ranks', M_embd_or_logits_or_ranks)  # shared from root
             # M_embd_boundary is shared with root via direct attribute (registered as buffer at root only)
             self.M_embd_boundary = M_embd_boundary
+        elif config.learned_assignment:
+            # Per-block head: sort the Beta-sampled head_init to make it the target distribution,
+            # then learnable scores assign which head gets which slot in that distribution.
+            self.register_buffer('M_head_target', torch.sort(head_init).values)
+            self.M_head_scores = nn.Parameter(torch.randn(config.n_head) * 0.01)
+            # M_embd target+scores are shared from root (passed in)
+            self.M_embd_scores = M_embd_or_logits_or_ranks  # nn.Parameter from root
+            self.M_embd_target = M_embd_target               # buffer ref from root
+            # anneal_t: per-module buffer, updated together via GatedGPT.set_learn_assign_anneal()
+            self.register_buffer('learn_assign_anneal_t', torch.tensor(1.0))
         elif config.trainable_masks:
             self.M_head_logits = nn.Parameter(_beta_to_logit(head_init))
             self.M_embd_logits = M_embd_or_logits_or_ranks
@@ -236,6 +298,8 @@ class GatedSelfAttention(nn.Module):
     def _M_head(self):
         if self.boundary_mode:
             return torch.sigmoid((self.M_head_ranks - self.M_head_boundary) * self.boundary_sharpness)
+        if self.learned_assignment:
+            return learn_assign_mask(self.M_head_scores, self.M_head_target, self.learn_assign_anneal_t)
         if self.trainable_masks:
             return torch.sigmoid(self.M_head_logits)
         return self.M_head
@@ -243,6 +307,8 @@ class GatedSelfAttention(nn.Module):
     def _M_embd(self):
         if self.boundary_mode:
             return torch.sigmoid((self.M_embd_ranks - self.M_embd_boundary) * self.boundary_sharpness)
+        if self.learned_assignment:
+            return learn_assign_mask(self.M_embd_scores, self.M_embd_target, self.learn_assign_anneal_t)
         if self.trainable_masks:
             return torch.sigmoid(self.M_embd_logits)
         return self.M_embd
@@ -267,7 +333,7 @@ class GatedSelfAttention(nn.Module):
 
 class GatedMLP(nn.Module):
     def __init__(self, config: GatedGPTConfig, layer_idx: int, M_embd_or_logits_or_ranks: torch.Tensor,
-                 M_embd_boundary: torch.Tensor = None):
+                 M_embd_boundary: torch.Tensor = None, M_embd_target: torch.Tensor = None):
         super().__init__()
         self.c_fc = nn.Linear(config.n_embd, 4 * config.n_embd, bias=config.bias)
         self.c_proj = nn.Linear(4 * config.n_embd, config.n_embd, bias=config.bias)
@@ -276,12 +342,19 @@ class GatedMLP(nn.Module):
         self.trainable_masks = config.trainable_masks
         self.boundary_mode = config.boundary_mode
         self.boundary_sharpness = config.boundary_sharpness
+        self.learned_assignment = config.learned_assignment
         inner_init = sample_beta_half_mask((4 * config.n_embd,), seed=config.mask_seed + 100 * layer_idx + 2, alpha=config.rank_beta_alpha)
         if config.boundary_mode:
             self.register_buffer('M_inner_ranks', inner_init)
             self.register_buffer('M_inner_boundary', torch.tensor(0.5))
             self.register_buffer('M_embd_ranks', M_embd_or_logits_or_ranks)
             self.M_embd_boundary = M_embd_boundary
+        elif config.learned_assignment:
+            self.register_buffer('M_inner_target', torch.sort(inner_init).values)
+            self.M_inner_scores = nn.Parameter(torch.randn(4 * config.n_embd) * 0.01)
+            self.M_embd_scores = M_embd_or_logits_or_ranks  # nn.Parameter from root
+            self.M_embd_target = M_embd_target               # buffer ref from root
+            self.register_buffer('learn_assign_anneal_t', torch.tensor(1.0))
         elif config.trainable_masks:
             self.M_inner_logits = nn.Parameter(_beta_to_logit(inner_init))
             self.M_embd_logits = M_embd_or_logits_or_ranks
@@ -292,6 +365,8 @@ class GatedMLP(nn.Module):
     def _M_inner(self):
         if self.boundary_mode:
             return torch.sigmoid((self.M_inner_ranks - self.M_inner_boundary) * self.boundary_sharpness)
+        if self.learned_assignment:
+            return learn_assign_mask(self.M_inner_scores, self.M_inner_target, self.learn_assign_anneal_t)
         if self.trainable_masks:
             return torch.sigmoid(self.M_inner_logits)
         return self.M_inner
@@ -299,6 +374,8 @@ class GatedMLP(nn.Module):
     def _M_embd(self):
         if self.boundary_mode:
             return torch.sigmoid((self.M_embd_ranks - self.M_embd_boundary) * self.boundary_sharpness)
+        if self.learned_assignment:
+            return learn_assign_mask(self.M_embd_scores, self.M_embd_target, self.learn_assign_anneal_t)
         if self.trainable_masks:
             return torch.sigmoid(self.M_embd_logits)
         return self.M_embd
@@ -312,12 +389,12 @@ class GatedMLP(nn.Module):
 
 
 class GatedBlock(nn.Module):
-    def __init__(self, config: GatedGPTConfig, layer_idx: int, M_embd, M_embd_boundary=None):
+    def __init__(self, config: GatedGPTConfig, layer_idx: int, M_embd, M_embd_boundary=None, M_embd_target=None):
         super().__init__()
         self.ln_1 = nn.LayerNorm(config.n_embd, bias=config.bias)
-        self.attn = GatedSelfAttention(config, layer_idx, M_embd, M_embd_boundary)
+        self.attn = GatedSelfAttention(config, layer_idx, M_embd, M_embd_boundary, M_embd_target)
         self.ln_2 = nn.LayerNorm(config.n_embd, bias=config.bias)
-        self.mlp = GatedMLP(config, layer_idx, M_embd, M_embd_boundary)
+        self.mlp = GatedMLP(config, layer_idx, M_embd, M_embd_boundary, M_embd_target)
 
     def forward(self, x: torch.Tensor, alpha: float, corpus) -> torch.Tensor:
         x = x + self.attn(self.ln_1(x), alpha, corpus)
@@ -334,6 +411,7 @@ class GatedGPT(nn.Module):
 
         self.boundary_mode = config.boundary_mode
         self.boundary_sharpness = config.boundary_sharpness
+        self.learned_assignment = config.learned_assignment
 
         # Global per-channel mask for the residual-stream (n_embd) dimension.
         # Sampled once with a layer-independent seed so re-runs reproduce it.
@@ -341,11 +419,23 @@ class GatedGPT(nn.Module):
         # (embeddings, every block's c_proj output, and ln_f output before lm_head).
         M_embd_init = sample_beta_half_mask((config.n_embd,), seed=config.mask_seed, alpha=config.rank_beta_alpha)
         shared_boundary = None
+        shared_target = None
         if config.boundary_mode:
             self.register_buffer('M_embd_ranks', M_embd_init)
             self.register_buffer('M_embd_boundary', torch.tensor(0.5))
             shared = M_embd_init
             shared_boundary = self.M_embd_boundary  # tensor reference shared with blocks
+        elif config.learned_assignment:
+            # Sorted target distribution = the committed mask shape. Learnable scores
+            # let the model assign each embd channel to a slot in that distribution.
+            self.register_buffer('M_embd_target', torch.sort(M_embd_init).values)
+            self.M_embd_scores = nn.Parameter(torch.randn(config.n_embd) * 0.01)
+            shared = self.M_embd_scores
+            shared_target = self.M_embd_target  # buffer ref shared with blocks
+            # Anneal scalar — multiplier on deviation of target_values from 0.5.
+            # t=1 → full committed distribution; t=0 → all targets collapse to 0.5
+            # (every neuron fully mixed). Schedule t over training to "force unmixing."
+            self.register_buffer('learn_assign_anneal_t', torch.tensor(1.0))
         elif config.trainable_masks:
             self.M_embd_logits = nn.Parameter(_beta_to_logit(M_embd_init))
             shared = self.M_embd_logits
@@ -357,7 +447,7 @@ class GatedGPT(nn.Module):
             wte=nn.Embedding(config.vocab_size, config.n_embd),
             wpe=nn.Embedding(config.block_size, config.n_embd),
             drop=nn.Dropout(config.dropout),
-            h=nn.ModuleList([GatedBlock(config, i, shared, shared_boundary) for i in range(config.n_layer)]),
+            h=nn.ModuleList([GatedBlock(config, i, shared, shared_boundary, shared_target) for i in range(config.n_layer)]),
             ln_f=nn.LayerNorm(config.n_embd, bias=config.bias),
         ))
         self.lm_head = nn.Linear(config.n_embd, config.vocab_size, bias=False)
@@ -374,9 +464,26 @@ class GatedGPT(nn.Module):
     def _M_embd(self):
         if self.boundary_mode:
             return torch.sigmoid((self.M_embd_ranks - self.M_embd_boundary) * self.boundary_sharpness)
+        if self.learned_assignment:
+            return learn_assign_mask(self.M_embd_scores, self.M_embd_target, self.learn_assign_anneal_t)
         if self.trainable_masks:
             return torch.sigmoid(self.M_embd_logits)
         return self.M_embd
+
+    def set_learn_assign_anneal(self, t: float):
+        """Set the anneal_t scalar on root + every block (kept in sync).
+
+        t ∈ [0, 1]: 0 = all targets collapse to 0.5 (full mix); 1 = full target shape.
+        Train-time scheduler calls this each iter (or every K iters) to anneal
+        the target distribution from mixed → committed over training.
+        """
+        if not self.learned_assignment:
+            return
+        with torch.no_grad():
+            self.learn_assign_anneal_t.fill_(t)
+            for block in self.transformer.h:
+                block.attn.learn_assign_anneal_t.fill_(t)
+                block.mlp.learn_assign_anneal_t.fill_(t)
 
     def shift_all_boundaries(self, delta: float):
         """Move ALL mask boundaries (M_embd, every layer's M_head and M_inner) by `delta`.
@@ -482,19 +589,26 @@ class GatedGPT(nn.Module):
         return out
 
     def mask_logit_params(self):
-        """Iterate over all mask logit Parameters (for separate optimizer LR group).
+        """Iterate over all mask learnable Parameters (for separate optimizer LR group).
 
-        Returns an empty iterator if trainable_masks=False.
+        Covers both `trainable_masks` (sigmoid(logits)) and `learned_assignment`
+        (per-neuron scores driving the hard-assignment STE). Returns an empty
+        iterator if neither mode is active.
+
+        M_embd is owned by GatedGPT and SHARED across blocks via weight-tying.
+        Yielding it from here only (not from each block's attn/mlp) avoids
+        double-counting in the optimizer.
         """
-        if not self.trainable_masks:
-            return
-        # M_embd is owned by GatedGPT and SHARED across blocks via weight-tying.
-        # Yielding it from here only (not from each block's attn/mlp) avoids
-        # double-counting in the optimizer.
-        yield self.M_embd_logits
-        for block in self.transformer.h:
-            yield block.attn.M_head_logits
-            yield block.mlp.M_inner_logits
+        if self.trainable_masks:
+            yield self.M_embd_logits
+            for block in self.transformer.h:
+                yield block.attn.M_head_logits
+                yield block.mlp.M_inner_logits
+        elif self.learned_assignment:
+            yield self.M_embd_scores
+            for block in self.transformer.h:
+                yield block.attn.M_head_scores
+                yield block.mlp.M_inner_scores
 
     def mask_variance_regularizer(self, gamma=0.25):
         """Anti-collapse penalty on the population standard deviation of each mask.
