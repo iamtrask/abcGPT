@@ -199,7 +199,7 @@ def train_with_logging(
     learn_assign_anneal=False,
     learn_assign_anneal_start=0.05,
     learn_assign_anneal_end=1.0,
-    learn_assign_anneal_cap=0.75,
+    learn_assign_anneal_cap=1.0,
     single_cohort='none',
 ):
     """Same logic as gated_gpt_tent.train_gated, but writes a structured JSONL log.
@@ -660,12 +660,13 @@ def main():
                    help='(learn-assign anneal) Starting anneal_t value (must be > 0 to keep gradient signal).')
     p.add_argument('--learn-assign-anneal-end', type=float, default=1.0,
                    help='(learn-assign anneal) Final anneal_t value (1.0 = full target shape).')
-    p.add_argument('--learn-assign-anneal-cap', type=float, default=0.75,
-                   help='(learn-assign anneal) Max anneal_t the schedule ramps to. Default 0.75. '
-                        'Empirical finding: ramping fully to 1.0 collapses endpoint-α evaluation '
-                        '(shake@a=1.0, ts@a=0.0) because at full anneal_t, bell-distributed neurons '
-                        'with narrowness=1 fire only near α=0.5. Mid-range (~0.7-0.8) preserves '
-                        'endpoint behavior while still providing specialization signal.')
+    p.add_argument('--learn-assign-anneal-cap', type=float, default=1.0,
+                   help='(learn-assign anneal) Max anneal_t the schedule ramps to. Default 1.0 — '
+                        'matches the end-state gate strength of fixed-mn and pert-* variants for '
+                        'apples-to-apples comparison. Caveat: cap=1.0 with bell-distributed targets '
+                        'AND narrowness=1 collapses endpoint-α eval (m≈0.5 neurons fire only at α=0.5). '
+                        'Use cap < 1.0 if combining bell rank-α with narrowness=1; or use U-shape '
+                        'targets (rank-α=0.5) which have specialists that fire at endpoints.')
     # Device + smoke
     p.add_argument('--device', default='cuda' if torch.cuda.is_available() else 'cpu')
     p.add_argument('--amp-dtype', default='bfloat16', choices=['bfloat16', 'float16', 'float32'])

@@ -181,26 +181,30 @@ SWEEP_DEFAULT = [
     ("la-beta-bell",
      "--variant fixed-mn --n-iters 10000 --span 1.0 --seed 1337 --eval-interval 500 --log-interval 250 --learned-assignment --learn-assign-anneal --rank-beta-alpha 2.0"),
 
-    # LEARN-ASSIGN-CAP SWEEP: find the right anneal_t ceiling. Empirically,
-    # la-beta-bell @ iter 7000 (anneal_t≈0.75) gave sum=2.111 — a new best
-    # beating pert-narrow-loose (sum=2.161). But ramping to anneal_t=1.0
-    # collapsed endpoint-α eval (sum jumped to 2.875 at iter 10k). Sweep cap
-    # to find where the tradeoff between specialization and endpoint-eval
-    # capacity actually optimizes.
-    ("la-beta-bell-cap0.5",
-     "--variant fixed-mn --n-iters 10000 --span 1.0 --seed 1337 --eval-interval 500 --log-interval 250 --learned-assignment --learn-assign-anneal --rank-beta-alpha 2.0 --learn-assign-anneal-cap 0.5"),
+    # LEARN-ASSIGN APPLES-TO-APPLES SWEEP (v2): anneal cap = 1.0 so end-state
+    # gate strength matches fixed-mn and pert-* variants exactly. Each la-v2-*
+    # variant pairs with a pert-* variant having identical knobs except for
+    # the assignment mechanism (la has learnable scores + warmup/ramp anneal,
+    # pert has fixed random Beta-sampled m_n). Isolates the question: does
+    # letting the model self-select neuron → role assignment help vs random?
+    #
+    # Note: la-v2-beta-bell will likely collapse like the prior la-beta-bell
+    # because bell + narrowness=1 + cap=1.0 starves endpoint-α eval. Including
+    # it as a control to confirm the collapse signature is reproducible.
+    ("la-v2-base",
+     "--variant fixed-mn --n-iters 10000 --span 1.0 --seed 1337 --eval-interval 500 --log-interval 250 --learned-assignment --learn-assign-anneal --rank-beta-alpha 0.5"),
 
-    ("la-beta-bell-cap0.65",
-     "--variant fixed-mn --n-iters 10000 --span 1.0 --seed 1337 --eval-interval 500 --log-interval 250 --learned-assignment --learn-assign-anneal --rank-beta-alpha 2.0 --learn-assign-anneal-cap 0.65"),
+    ("la-v2-narrow-loose",
+     "--variant fixed-mn --n-iters 10000 --span 2.0 --seed 1337 --eval-interval 500 --log-interval 250 --learned-assignment --learn-assign-anneal --rank-beta-alpha 0.5"),
 
-    ("la-beta-bell-cap0.75",
-     "--variant fixed-mn --n-iters 10000 --span 1.0 --seed 1337 --eval-interval 500 --log-interval 250 --learned-assignment --learn-assign-anneal --rank-beta-alpha 2.0 --learn-assign-anneal-cap 0.75"),
+    ("la-v2-narrow-tight",
+     "--variant fixed-mn --n-iters 10000 --span 0.5 --seed 1337 --eval-interval 500 --log-interval 250 --learned-assignment --learn-assign-anneal --rank-beta-alpha 0.5"),
 
-    ("la-beta-bell-cap0.85",
-     "--variant fixed-mn --n-iters 10000 --span 1.0 --seed 1337 --eval-interval 500 --log-interval 250 --learned-assignment --learn-assign-anneal --rank-beta-alpha 2.0 --learn-assign-anneal-cap 0.85"),
+    ("la-v2-beta-uniform",
+     "--variant fixed-mn --n-iters 10000 --span 1.0 --seed 1337 --eval-interval 500 --log-interval 250 --learned-assignment --learn-assign-anneal --rank-beta-alpha 1.0"),
 
-    ("la-beta-bell-cap1.0",
-     "--variant fixed-mn --n-iters 10000 --span 1.0 --seed 1337 --eval-interval 500 --log-interval 250 --learned-assignment --learn-assign-anneal --rank-beta-alpha 2.0 --learn-assign-anneal-cap 1.0"),
+    ("la-v2-beta-bell",
+     "--variant fixed-mn --n-iters 10000 --span 1.0 --seed 1337 --eval-interval 500 --log-interval 250 --learned-assignment --learn-assign-anneal --rank-beta-alpha 2.0"),
 
     # SINGLE-SOURCE CEILINGS: ungated model trained on ONE cohort only, for the
     # same 10k iter budget as nano-2 joint runs. Gives the true per-cohort floor
