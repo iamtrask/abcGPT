@@ -740,6 +740,15 @@ def main():
                         'Default 0.90 (= iter 9000 for n_iters=10000). Lower this to compress the '
                         'anneal into the early productive window so commitment happens before the '
                         'model starts overfitting. E.g. 0.30 → anneal completes by iter 3000.')
+    p.add_argument('--learn-assign-method', default='ste', choices=['ste', 'softsort'],
+                   help='(learn-assign) Method for the differentiable assignment. '
+                        '"ste" (default) = hard argsort + straight-through estimator (biased gradient, O(n log n)). '
+                        '"softsort" = soft permutation matrix at temperature τ (unbiased, O(n²)). '
+                        'SoftSort is slower but the gradient is closer to the true derivative.')
+    p.add_argument('--learn-assign-softsort-tau', type=float, default=1.0,
+                   help='(learn-assign softsort) Temperature τ for soft permutation. '
+                        'Smaller τ → sharper (closer to hard argsort). Larger τ → smoother. '
+                        'Default 1.0; reasonable range 0.1 – 10.0.')
     p.add_argument('--final-alpha-curve-points', type=int, default=11,
                    help='At end of training, sweep α ∈ linspace(0, 1, N) and eval val_loss for both '
                         'cohorts at each point. Captures the full slider quality curve so we can '
@@ -813,6 +822,8 @@ def main():
             boundary_sharpness=args.boundary_sharpness,
             rank_beta_alpha=args.rank_beta_alpha,
             learned_assignment=args.learned_assignment,
+            learn_assign_method=args.learn_assign_method,
+            learn_assign_softsort_tau=args.learn_assign_softsort_tau,
         )
         model = GatedGPT(cfg).to(args.device)
         ungated = False

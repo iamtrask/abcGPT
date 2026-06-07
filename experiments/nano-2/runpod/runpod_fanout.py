@@ -226,6 +226,20 @@ SWEEP_DEFAULT = [
     ("la-bell-ramp9k",
      "--variant fixed-mn --n-iters 10000 --span 1.0 --seed 1337 --eval-interval 500 --log-interval 250 --learned-assignment --learn-assign-anneal --rank-beta-alpha 2.0 --learn-assign-warmup-frac 0.10 --learn-assign-ramp-end-frac 0.90"),
 
+    # SOFTSORT SWEEP: same config as winning la-bell-ramp9k but with the
+    # differentiable SoftSort assignment instead of hard argsort + STE.
+    # SoftSort gives ~true gradient on scores (vs STE's biased identity proxy)
+    # at the cost of O(n²) compute. Tested 3 temperatures: lower τ → sharper
+    # assignment (closer to hard, larger gradient); higher τ → smoother.
+    ("la-bell-ramp9k-softsort-tau0.1",
+     "--variant fixed-mn --n-iters 10000 --span 1.0 --seed 1337 --eval-interval 500 --log-interval 250 --learned-assignment --learn-assign-anneal --rank-beta-alpha 2.0 --learn-assign-warmup-frac 0.10 --learn-assign-ramp-end-frac 0.90 --learn-assign-method softsort --learn-assign-softsort-tau 0.1"),
+
+    ("la-bell-ramp9k-softsort-tau0.5",
+     "--variant fixed-mn --n-iters 10000 --span 1.0 --seed 1337 --eval-interval 500 --log-interval 250 --learned-assignment --learn-assign-anneal --rank-beta-alpha 2.0 --learn-assign-warmup-frac 0.10 --learn-assign-ramp-end-frac 0.90 --learn-assign-method softsort --learn-assign-softsort-tau 0.5"),
+
+    ("la-bell-ramp9k-softsort-tau1.0",
+     "--variant fixed-mn --n-iters 10000 --span 1.0 --seed 1337 --eval-interval 500 --log-interval 250 --learned-assignment --learn-assign-anneal --rank-beta-alpha 2.0 --learn-assign-warmup-frac 0.10 --learn-assign-ramp-end-frac 0.90 --learn-assign-method softsort --learn-assign-softsort-tau 1.0"),
+
     # SINGLE-SOURCE CEILINGS: ungated model trained on ONE cohort only, for the
     # same 10k iter budget as nano-2 joint runs. Gives the true per-cohort floor
     # ("what could you get if you didn't have to share weights at all?").

@@ -227,6 +227,14 @@ class GatedGPTConfig:
     boundary_sharpness: float = 10.0  # sharpness of sigmoid transition. higher = sharper specialist/halfsie split.
     rank_beta_alpha: float = 0.5      # symmetric Beta(α, α) shape parameter for rank/mask sampling.
                                       # 0.5 = U-shape (default), 1.0 = uniform, 2.0 = bell.
+    learn_assign_method: str = 'ste'  # 'ste' = hard argsort + straight-through (current default).
+                                       # 'softsort' = differentiable approximation via soft permutation matrix
+                                       # at temperature tau. Higher tau = smoother; lower → hard.
+                                       # SoftSort has O(n²) compute vs STE's O(n log n) but gives unbiased
+                                       # gradient (vs STE's identity proxy).
+    learn_assign_softsort_tau: float = 1.0  # Temperature for soft permutation matrix when method='softsort'.
+                                             # Smaller → sharper assignment (closer to hard argsort).
+                                             # Larger → smoother → easier optimization but more averaged m_n.
     learned_assignment: bool = False  # When True: masks via hard-assignment-with-STE. Sample target_values
                                       # (sorted Beta(α, α)) and maintain per-neuron learnable scores. Forward:
                                       # neuron with i-th rank score gets i-th target value (distribution
@@ -234,6 +242,39 @@ class GatedGPTConfig:
                                       # Lets the model decide which neurons go where while the overall
                                       # mask distribution stays fixed at the target shape. Mutually
                                       # exclusive with boundary_mode and trainable_masks.
+
+
+def softsort_assign_mask(scores, target_values, tau=1.0):
+    """Differentiable approximation of learn_assign_mask via SoftSort.
+
+    Builds a soft permutation matrix P (n × n) at temperature tau:
+        P[i, j] = softmax_j(-(sort(scores)[i] - scores[j])² / tau)
+    P[i, j] ≈ "probability that neuron j has rank i."
+
+    Then m[j] = sum_i P[i, j] * target_values[i] = (Pᵀ @ target_values)[j].
+
+    As tau → 0, P → hard permutation matrix and m → STE result.
+    As tau → ∞, P → uniform 1/n and m → mean(target_values) for every neuron.
+
+    Reference: Prillo & Eisenschlos, "SoftSort: A Continuous Relaxation
+    for the argsort Operator" (ICML 2020).
+
+    Cost: O(n²) — for our largest mask (n_inner=1536), ~2.4M ops per call
+    per layer × 6 layers ≈ ~15M extra ops per forward. Manageable.
+    """
+    with torch.amp.autocast(device_type=scores.device.type, enabled=False):
+        scores_f = scores.float()
+        tv_f = target_values.float()
+        n = scores_f.shape[0]
+        # sort scores ascending so rank-0 = smallest score = target_values[0] (smallest target)
+        s_sorted, _ = torch.sort(scores_f, descending=False)
+        # Pairwise: how close is each neuron's score to each rank's order statistic
+        # shape (n, n): row i = rank i, col j = neuron j
+        sim = -((s_sorted.unsqueeze(1) - scores_f.unsqueeze(0)) ** 2)
+        P = torch.softmax(sim / max(tau, 1e-6), dim=-1)        # (n, n), rows sum to 1
+        # m[j] = sum_i P[i, j] * tv_f[i]   →   m = Pᵀ @ tv_f
+        m = P.transpose(0, 1) @ tv_f
+        return m
 
 
 def learn_assign_mask(scores, target_values):
@@ -277,6 +318,13 @@ def learn_assign_mask(scores, target_values):
         m_hard = torch.empty_like(tv_f)
         m_hard[sorted_idx] = tv_f                        # neuron at rank-i gets target[i]
         return scores_f + (m_hard - scores_f).detach()   # STE: forward=m_hard, grad=scores
+
+
+def _la_dispatch(scores, target, method, tau):
+    """Single dispatch point for the two learn-assign methods."""
+    if method == 'softsort':
+        return softsort_assign_mask(scores, target, tau)
+    return learn_assign_mask(scores, target)  # 'ste' (default)
 
 
 def _beta_to_logit(m, eps=1e-4):
@@ -333,6 +381,8 @@ class GatedSelfAttention(nn.Module):
             self.register_buffer('M_embd_target', M_embd_target)
             # anneal_t: per-module buffer, updated together via GatedGPT.set_learn_assign_anneal()
             self.register_buffer('learn_assign_anneal_t', torch.tensor(1.0))
+            self.learn_assign_method = config.learn_assign_method
+            self.learn_assign_softsort_tau = config.learn_assign_softsort_tau
         elif config.trainable_masks:
             self.M_head_logits = nn.Parameter(_beta_to_logit(head_init))
             self.M_embd_logits = M_embd_or_logits_or_ranks
@@ -344,7 +394,7 @@ class GatedSelfAttention(nn.Module):
         if self.boundary_mode:
             return torch.sigmoid((self.M_head_ranks - self.M_head_boundary) * self.boundary_sharpness)
         if self.learned_assignment:
-            return learn_assign_mask(self.M_head_scores, self.M_head_target)
+            return _la_dispatch(self.M_head_scores, self.M_head_target, self.learn_assign_method, self.learn_assign_softsort_tau)
         if self.trainable_masks:
             return torch.sigmoid(self.M_head_logits)
         return self.M_head
@@ -353,7 +403,7 @@ class GatedSelfAttention(nn.Module):
         if self.boundary_mode:
             return torch.sigmoid((self.M_embd_ranks - self.M_embd_boundary) * self.boundary_sharpness)
         if self.learned_assignment:
-            return learn_assign_mask(self.M_embd_scores, self.M_embd_target)
+            return _la_dispatch(self.M_embd_scores, self.M_embd_target, self.learn_assign_method, self.learn_assign_softsort_tau)
         if self.trainable_masks:
             return torch.sigmoid(self.M_embd_logits)
         return self.M_embd
@@ -402,6 +452,8 @@ class GatedMLP(nn.Module):
             # See GatedSelfAttention for why this MUST be register_buffer, not attr-assign.
             self.register_buffer('M_embd_target', M_embd_target)
             self.register_buffer('learn_assign_anneal_t', torch.tensor(1.0))
+            self.learn_assign_method = config.learn_assign_method
+            self.learn_assign_softsort_tau = config.learn_assign_softsort_tau
         elif config.trainable_masks:
             self.M_inner_logits = nn.Parameter(_beta_to_logit(inner_init))
             self.M_embd_logits = M_embd_or_logits_or_ranks
@@ -413,7 +465,7 @@ class GatedMLP(nn.Module):
         if self.boundary_mode:
             return torch.sigmoid((self.M_inner_ranks - self.M_inner_boundary) * self.boundary_sharpness)
         if self.learned_assignment:
-            return learn_assign_mask(self.M_inner_scores, self.M_inner_target)
+            return _la_dispatch(self.M_inner_scores, self.M_inner_target, self.learn_assign_method, self.learn_assign_softsort_tau)
         if self.trainable_masks:
             return torch.sigmoid(self.M_inner_logits)
         return self.M_inner
@@ -422,7 +474,7 @@ class GatedMLP(nn.Module):
         if self.boundary_mode:
             return torch.sigmoid((self.M_embd_ranks - self.M_embd_boundary) * self.boundary_sharpness)
         if self.learned_assignment:
-            return learn_assign_mask(self.M_embd_scores, self.M_embd_target)
+            return _la_dispatch(self.M_embd_scores, self.M_embd_target, self.learn_assign_method, self.learn_assign_softsort_tau)
         if self.trainable_masks:
             return torch.sigmoid(self.M_embd_logits)
         return self.M_embd
@@ -484,6 +536,8 @@ class GatedGPT(nn.Module):
             # t=1 → full committed distribution; t=0 → all targets collapse to 0.5
             # (every neuron fully mixed). Schedule t over training to "force unmixing."
             self.register_buffer('learn_assign_anneal_t', torch.tensor(1.0))
+            self.learn_assign_method = config.learn_assign_method
+            self.learn_assign_softsort_tau = config.learn_assign_softsort_tau
         elif config.trainable_masks:
             self.M_embd_logits = nn.Parameter(_beta_to_logit(M_embd_init))
             shared = self.M_embd_logits
@@ -513,7 +567,7 @@ class GatedGPT(nn.Module):
         if self.boundary_mode:
             return torch.sigmoid((self.M_embd_ranks - self.M_embd_boundary) * self.boundary_sharpness)
         if self.learned_assignment:
-            return learn_assign_mask(self.M_embd_scores, self.M_embd_target)
+            return _la_dispatch(self.M_embd_scores, self.M_embd_target, self.learn_assign_method, self.learn_assign_softsort_tau)
         if self.trainable_masks:
             return torch.sigmoid(self.M_embd_logits)
         return self.M_embd
