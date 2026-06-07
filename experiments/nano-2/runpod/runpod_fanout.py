@@ -181,6 +181,27 @@ SWEEP_DEFAULT = [
     ("la-beta-bell",
      "--variant fixed-mn --n-iters 10000 --span 1.0 --seed 1337 --eval-interval 500 --log-interval 250 --learned-assignment --learn-assign-anneal --rank-beta-alpha 2.0"),
 
+    # LEARN-ASSIGN-CAP SWEEP: find the right anneal_t ceiling. Empirically,
+    # la-beta-bell @ iter 7000 (anneal_t≈0.75) gave sum=2.111 — a new best
+    # beating pert-narrow-loose (sum=2.161). But ramping to anneal_t=1.0
+    # collapsed endpoint-α eval (sum jumped to 2.875 at iter 10k). Sweep cap
+    # to find where the tradeoff between specialization and endpoint-eval
+    # capacity actually optimizes.
+    ("la-beta-bell-cap0.5",
+     "--variant fixed-mn --n-iters 10000 --span 1.0 --seed 1337 --eval-interval 500 --log-interval 250 --learned-assignment --learn-assign-anneal --rank-beta-alpha 2.0 --learn-assign-anneal-cap 0.5"),
+
+    ("la-beta-bell-cap0.65",
+     "--variant fixed-mn --n-iters 10000 --span 1.0 --seed 1337 --eval-interval 500 --log-interval 250 --learned-assignment --learn-assign-anneal --rank-beta-alpha 2.0 --learn-assign-anneal-cap 0.65"),
+
+    ("la-beta-bell-cap0.75",
+     "--variant fixed-mn --n-iters 10000 --span 1.0 --seed 1337 --eval-interval 500 --log-interval 250 --learned-assignment --learn-assign-anneal --rank-beta-alpha 2.0 --learn-assign-anneal-cap 0.75"),
+
+    ("la-beta-bell-cap0.85",
+     "--variant fixed-mn --n-iters 10000 --span 1.0 --seed 1337 --eval-interval 500 --log-interval 250 --learned-assignment --learn-assign-anneal --rank-beta-alpha 2.0 --learn-assign-anneal-cap 0.85"),
+
+    ("la-beta-bell-cap1.0",
+     "--variant fixed-mn --n-iters 10000 --span 1.0 --seed 1337 --eval-interval 500 --log-interval 250 --learned-assignment --learn-assign-anneal --rank-beta-alpha 2.0 --learn-assign-anneal-cap 1.0"),
+
     # SINGLE-SOURCE CEILINGS: ungated model trained on ONE cohort only, for the
     # same 10k iter budget as nano-2 joint runs. Gives the true per-cohort floor
     # ("what could you get if you didn't have to share weights at all?").
@@ -246,7 +267,11 @@ def launch_pod(runpod_module, name, gpu_type, cloud_type, image, env, dry_run):
         volume_in_gb=0,
         container_disk_in_gb=20,
         env=env,
-        docker_args="bash -c 'curl -fsSL https://raw.githubusercontent.com/iamtrask/abcGPT/main/experiments/nano-2/runpod/on_box.sh | bash; sleep 60'",
+        # `sleep infinity` after on_box.sh prevents RunPod from restarting the
+        # container after script exit (which previously caused restart-loop runs
+        # that wasted GPU $ and blew through HF rate limits). Pod stays idle
+        # after training completes; orchestrator (or manual kill) terminates it.
+        docker_args="bash -c 'curl -fsSL https://raw.githubusercontent.com/iamtrask/abcGPT/main/experiments/nano-2/runpod/on_box.sh | bash; sleep infinity'",
     )
     return pod["id"]
 

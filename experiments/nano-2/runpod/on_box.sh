@@ -88,7 +88,8 @@ echo "--- start background log-pusher (60s interval) ---"
   # Wait a beat so the path actually exists when we start polling.
   sleep 5
   while true; do
-    sleep 55
+    sleep 295  # 5-minute interval — was 55s; HF caps at 128 commits/hour
+                # and 5 pods × ~60 commits each blew the budget on prior la sweep
     if [[ -f "$LOG_PATH" ]]; then
       python3 - <<PYEOF 2>/dev/null || true
 import os

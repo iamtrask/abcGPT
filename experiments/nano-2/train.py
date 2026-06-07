@@ -199,6 +199,7 @@ def train_with_logging(
     learn_assign_anneal=False,
     learn_assign_anneal_start=0.05,
     learn_assign_anneal_end=1.0,
+    learn_assign_anneal_cap=0.75,
     single_cohort='none',
 ):
     """Same logic as gated_gpt_tent.train_gated, but writes a structured JSONL log.
@@ -366,19 +367,22 @@ def train_with_logging(
 
         # learn-assign anneal schedule — gate-strength blend, NOT mask-value collapse.
         # anneal_t=0 → gate is identity (model trains like ungated, all neurons active);
-        # anneal_t=1 → gate is full tent (specialization committed).
-        # Schedule: pure ungated for first 10% iters, linear ramp to 1.0 over middle 80%,
-        # full gating for final 10% so the committed roles get to settle in.
+        # anneal_t=cap → gate is mostly tent but blended with some baseline activation.
+        # Schedule: pure ungated for first 10% iters (warmup, weights learn freely);
+        # linear ramp from 0 to cap over middle 80% (specialization grows in via STE);
+        # plateau at cap for final 10% (committed roles get to settle in).
+        # Cap defaults to 0.75 — ramping fully to 1.0 collapses endpoint-α eval.
         if learn_assign_anneal and getattr(model, 'learned_assignment', False):
             warmup_iters = int(0.10 * n_iters)
             settle_iters = int(0.10 * n_iters)
             ramp_end = n_iters - settle_iters
+            cap = learn_assign_anneal_cap
             if it < warmup_iters:
                 t_val = 0.0
             elif it < ramp_end:
-                t_val = (it - warmup_iters) / max(1, ramp_end - warmup_iters)
+                t_val = cap * (it - warmup_iters) / max(1, ramp_end - warmup_iters)
             else:
-                t_val = 1.0
+                t_val = cap
             model.set_learn_assign_anneal(t_val)
 
         balance_pen = None  # populated only in balance-penalty mode
@@ -656,6 +660,12 @@ def main():
                    help='(learn-assign anneal) Starting anneal_t value (must be > 0 to keep gradient signal).')
     p.add_argument('--learn-assign-anneal-end', type=float, default=1.0,
                    help='(learn-assign anneal) Final anneal_t value (1.0 = full target shape).')
+    p.add_argument('--learn-assign-anneal-cap', type=float, default=0.75,
+                   help='(learn-assign anneal) Max anneal_t the schedule ramps to. Default 0.75. '
+                        'Empirical finding: ramping fully to 1.0 collapses endpoint-α evaluation '
+                        '(shake@a=1.0, ts@a=0.0) because at full anneal_t, bell-distributed neurons '
+                        'with narrowness=1 fire only near α=0.5. Mid-range (~0.7-0.8) preserves '
+                        'endpoint behavior while still providing specialization signal.')
     # Device + smoke
     p.add_argument('--device', default='cuda' if torch.cuda.is_available() else 'cpu')
     p.add_argument('--amp-dtype', default='bfloat16', choices=['bfloat16', 'float16', 'float32'])
@@ -769,6 +779,7 @@ def main():
         learn_assign_anneal=args.learn_assign_anneal,
         learn_assign_anneal_start=args.learn_assign_anneal_start,
         learn_assign_anneal_end=args.learn_assign_anneal_end,
+        learn_assign_anneal_cap=args.learn_assign_anneal_cap,
         single_cohort=args.single_cohort,
     )
 
