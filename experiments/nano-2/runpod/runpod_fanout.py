@@ -312,6 +312,7 @@ def run_until_done(
     poll_interval=30,
     timeout=7200,
     max_retries_per_chunk=30,
+    force_rerun=False,
 ):
     """Drive sweep to completion: initial launches, retries, monitoring, termination.
 
@@ -385,7 +386,7 @@ def run_until_done(
         launched = 0
         skipped = 0
         for idx, (variant_name, train_args) in pending_queue:
-            if variant_name in completed:
+            if variant_name in completed and not force_rerun:
                 skipped += 1
                 continue
             retry_counts[idx] = retry_counts.get(idx, 0) + 1
@@ -433,6 +434,9 @@ def main():
     p.add_argument("--hf-repo", default=DEFAULT_HF_REPO)
     p.add_argument("--git-sha", default="main")
     p.add_argument("--dry-run", action="store_true")
+    p.add_argument("--force-rerun", action="store_true",
+                   help="Re-run variants even if their summary.json is already on HF. "
+                        "Useful for backfilling new metrics (e.g. alpha_curve) onto previously-trained variants.")
     args = p.parse_args()
 
     sweep = SWEEP_DEFAULT
@@ -492,6 +496,7 @@ def main():
         gpu_type=args.gpu_type, cloud_type=args.cloud_type, image=args.image,
         hf_token=hf_token, hf_repo=args.hf_repo,
         git_sha=args.git_sha,
+        force_rerun=args.force_rerun,
     )
 
     print(f"\nResults on HF: https://huggingface.co/{args.hf_repo}")

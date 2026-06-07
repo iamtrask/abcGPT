@@ -59,7 +59,16 @@ echo "checked out: $(git rev-parse --short HEAD)"
 echo "--- python deps ---"
 pip install -q --upgrade pip
 pip install -q numpy "huggingface_hub>=0.24"
-# torch should already be in the pytorch image
+# torch should already be in the pytorch image. UPGRADE_TORCH=1 forces an
+# upgrade to a newer cu128 wheel — used to test whether the cloud-vs-notebook
+# precision gap is closed by the newer PyTorch + CUDA stack.
+if [[ "${UPGRADE_TORCH:-0}" == "1" ]]; then
+  echo "--- UPGRADE_TORCH=1: pip-installing torch ${TORCH_VERSION:-2.11.0} +cu128 ---"
+  pip install --upgrade torch=="${TORCH_VERSION:-2.11.0}" --index-url https://download.pytorch.org/whl/cu128 2>&1 | tail -5 || {
+    echo "TORCH UPGRADE FAILED — likely CUDA driver too old. Falling back to base image torch."
+  }
+  python3 -c "import torch; print(f'  torch={torch.__version__} cuda={torch.version.cuda} avail={torch.cuda.is_available()}')"
+fi
 
 # ------------------------------------------------------------------
 # 4. Prepare shake+TS data (downloads + tokenizes if not already there)
