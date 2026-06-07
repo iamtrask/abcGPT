@@ -368,6 +368,44 @@ SWEEP_DEFAULT = [
     # 12. Plain fixed-mn baseline rerun with RNG-fixed train.py — reference.
     ("fixed-mn-rngfix",
      "--variant fixed-mn --n-iters 10000 --span 1.0 --seed 1337 --eval-interval 500 --log-interval 250"),
+
+    # ========================================================================
+    # OVERNIGHT-2 2026-06-07: 6 more variants attacking the corrected-metric
+    # Pareto frontier (low endpoint_correct vs high contrast). The first sweep
+    # tested gate/schedule; this one tests combos and the two highest-leverage
+    # additions: explicit wrong-corner penalty + cohort-balance loss scaling.
+    # ========================================================================
+
+    # 13. Linear gate + freeze-scores combo (bell rank dist).
+    ("la-bell-ramp9k-linear-freeze3k",
+     "--variant fixed-mn --n-iters 10000 --span 1.0 --seed 1337 --eval-interval 500 --log-interval 250 --learned-assignment --learn-assign-anneal --rank-beta-alpha 2.0 --learn-assign-warmup-frac 0.10 --learn-assign-ramp-end-frac 0.90 --gate-type linear --freeze-scores-from-iter 3000"),
+
+    # 14. Linear gate + freeze-scores combo (U-shape rank dist).
+    ("la-u-ramp9k-linear-freeze3k",
+     "--variant fixed-mn --n-iters 10000 --span 1.0 --seed 1337 --eval-interval 500 --log-interval 250 --learned-assignment --learn-assign-anneal --rank-beta-alpha 0.5 --learn-assign-warmup-frac 0.10 --learn-assign-ramp-end-frac 0.90 --gate-type linear --freeze-scores-from-iter 3000"),
+
+    # 15. Linear gate + narrower tent (span 0.7). Narrowness <1 makes
+    #     specialists fire only near their corner — should pair well with
+    #     linear gate's exact-endpoint optima.
+    ("la-bell-ramp9k-linear-span0.7",
+     "--variant fixed-mn --n-iters 10000 --span 0.7 --seed 1337 --eval-interval 500 --log-interval 250 --learned-assignment --learn-assign-anneal --rank-beta-alpha 2.0 --learn-assign-warmup-frac 0.10 --learn-assign-ramp-end-frac 0.90 --gate-type linear"),
+
+    # 16. Tent gate + narrower tent (span 0.7). Prior narrow*1.3/1.5 variants
+    #     were too-wide (compromise); test the opposite direction.
+    ("la-bell-ramp9k-narrow0.7",
+     "--variant fixed-mn --n-iters 10000 --span 0.7 --seed 1337 --eval-interval 500 --log-interval 250 --learned-assignment --learn-assign-anneal --rank-beta-alpha 2.0 --learn-assign-warmup-frac 0.10 --learn-assign-ramp-end-frac 0.90"),
+
+    # 17. Wrong-corner penalty: at each step, also forward at the OPPOSITE
+    #     alpha corner and hinge-penalize that loss to a margin of 2 nats.
+    #     Direct attack on contrast (lesson #9). Lambda 0.3 is moderate.
+    ("la-bell-ramp9k-wrongcorner-l0.3",
+     "--variant fixed-mn --n-iters 10000 --span 1.0 --seed 1337 --eval-interval 500 --log-interval 250 --learned-assignment --learn-assign-anneal --rank-beta-alpha 2.0 --learn-assign-warmup-frac 0.10 --learn-assign-ramp-end-frac 0.90 --wrong-corner-lambda 0.3 --wrong-corner-margin 2.0"),
+
+    # 18. Cohort-balance: scale ts loss by 1.5x to compensate for ts being
+    #     ~0.5 nats easier than shake. Should shift X-shape crossing toward
+    #     α=0.5 and might equalize endpoint-correct loss.
+    ("la-bell-ramp9k-cohortbalance",
+     "--variant fixed-mn --n-iters 10000 --span 1.0 --seed 1337 --eval-interval 500 --log-interval 250 --learned-assignment --learn-assign-anneal --rank-beta-alpha 2.0 --learn-assign-warmup-frac 0.10 --learn-assign-ramp-end-frac 0.90 --ts-loss-scale 1.5"),
 ]
 
 

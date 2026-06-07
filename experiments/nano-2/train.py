@@ -205,6 +205,9 @@ def train_with_logging(
     freeze_scores_from_iter=-1,
     final_alpha_curve_points=11,
     single_cohort='none',
+    wrong_corner_lambda=0.0,
+    wrong_corner_margin=2.0,
+    ts_loss_scale=1.0,
 ):
     """Same logic as gated_gpt_tent.train_gated, but writes a structured JSONL log.
 
@@ -478,6 +481,10 @@ def train_with_logging(
                     _, ce_loss = model(X, Y)
                 else:
                     _, ce_loss = model(X, alpha, Y)
+                # Cohort-balance: scale ts loss so the two cohorts contribute
+                # equally despite ts being inherently easier (~0.5 nats).
+                if not ungated and cohort == 'ts' and ts_loss_scale != 1.0:
+                    ce_loss = ce_loss * ts_loss_scale
                 # Variance regularizer (trainable_masks=True only; zero otherwise)
                 if trainable_masks and lambda_var > 0:
                     var_pen = model.mask_variance_regularizer(gamma=var_gamma)
@@ -485,6 +492,15 @@ def train_with_logging(
                 else:
                     loss = ce_loss
                     var_pen = None
+                # Wrong-corner penalty: explicitly push UP the loss at the
+                # opposite-cohort corner of the slider. Margin-hinged so it
+                # only fires when the model is *too good* at the wrong corner.
+                # Forces the X-shape to widen (lesson #9 frontier attack).
+                if not ungated and wrong_corner_lambda > 0:
+                    wrong_alpha = 0.0 if cohort == 'shake' else 1.0
+                    _, loss_wrong = model(X, wrong_alpha, Y)
+                    wrong_penalty = torch.clamp(wrong_corner_margin - loss_wrong, min=0.0)
+                    loss = loss + wrong_corner_lambda * wrong_penalty
         loss.backward()
         # Warmup: zero mask gradients for first warmup_mn iters so weights find
         # their initial specialization before m_n starts drifting.
@@ -773,6 +789,18 @@ def main():
                         '(assignment frozen but weights keep training). Lets the model commit '
                         'to a learned assignment then specialize hard at it, mimicking fixed-mn '
                         'training time at the assignment. -1 = never freeze (default).')
+    p.add_argument('--wrong-corner-lambda', type=float, default=0.0,
+                   help='Weight on the wrong-corner penalty: at each train step, additionally '
+                        'forward the current batch at the OPPOSITE alpha corner (shake batch → α=0; '
+                        'ts batch → α=1) and add a hinge penalty pushing that loss UP to a margin. '
+                        'Directly widens the X-shape. 0 disables; 0.3 = moderate; >1.0 risks instability.')
+    p.add_argument('--wrong-corner-margin', type=float, default=2.0,
+                   help='Margin (nats) above which the wrong-corner loss is "high enough" and the '
+                        'penalty stops pushing. Hinge: penalty = max(0, margin - loss_wrong).')
+    p.add_argument('--ts-loss-scale', type=float, default=1.0,
+                   help='Multiplier on ts-cohort CE loss to compensate for ts being inherently '
+                        'easier than shake by ~0.5 nats. 1.5 ≈ equal-difficulty in expectation. '
+                        'Does NOT affect alpha distribution or batch selection.')
     p.add_argument('--gate-type', default='tent', choices=['tent', 'linear'],
                    help='Gate function. "tent" (default, original): cos²((α−m)/span). Smooth bell '
                         'centered at α=m. Has interior optima (best loss not at α=0 or 1 exactly). '
@@ -907,6 +935,9 @@ def main():
         final_alpha_curve_points=args.final_alpha_curve_points,
         single_cohort=args.single_cohort,
         freeze_scores_from_iter=args.freeze_scores_from_iter,
+        wrong_corner_lambda=args.wrong_corner_lambda,
+        wrong_corner_margin=args.wrong_corner_margin,
+        ts_loss_scale=args.ts_loss_scale,
     )
 
     # Save final summary + final m_n snapshot if applicable
