@@ -199,6 +199,7 @@ def train_with_logging(
     learn_assign_anneal=False,
     learn_assign_anneal_start=0.05,
     learn_assign_anneal_end=1.0,
+    single_cohort='none',
 ):
     """Same logic as gated_gpt_tent.train_gated, but writes a structured JSONL log.
 
@@ -371,8 +372,15 @@ def train_with_logging(
                 balance_pen = (loss_sh - loss_ts).abs()
                 loss = ce_loss + lambda_balance * balance_pen
         else:
-            alpha = sample_alpha()
-            use_shake = torch.rand(1).item() < alpha
+            if single_cohort == 'shake':
+                alpha = 1.0
+                use_shake = True
+            elif single_cohort == 'ts':
+                alpha = 0.0
+                use_shake = False
+            else:
+                alpha = sample_alpha()
+                use_shake = torch.rand(1).item() < alpha
             if use_shake:
                 X, Y = get_shake_batch()
                 n_shake += 1
@@ -553,6 +561,11 @@ def main():
     p.add_argument('--weight-decay', type=float, default=0.1)
     p.add_argument('--grad-clip', type=float, default=1.0)
     p.add_argument('--alpha-dist', default='beta_half', choices=['beta_half', 'uniform', 'bimodal_endpoints'])
+    p.add_argument('--single-cohort', default='none', choices=['none', 'shake', 'ts'],
+                   help='Restrict training to ONE cohort only (no alpha sampling, always pulls from '
+                        'that cohort). Used for true single-source ceiling baselines: train ungated '
+                        'on shake-only or ts-only at the same iter count as nano-2 joint runs, then '
+                        'compare to see how much positive transfer the joint training is providing.')
     # Match the notebook defaults exactly: log every 250 iters, eval every 500.
     p.add_argument('--log-interval', type=int, default=250)
     p.add_argument('--eval-interval', type=int, default=500)

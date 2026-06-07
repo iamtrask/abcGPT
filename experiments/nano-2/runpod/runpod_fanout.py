@@ -181,6 +181,18 @@ SWEEP_DEFAULT = [
     ("la-beta-bell",
      "--variant fixed-mn --n-iters 10000 --span 1.0 --seed 1337 --eval-interval 500 --log-interval 250 --learned-assignment --learn-assign-anneal --rank-beta-alpha 2.0"),
 
+    # SINGLE-SOURCE CEILINGS: ungated model trained on ONE cohort only, for the
+    # same 10k iter budget as nano-2 joint runs. Gives the true per-cohort floor
+    # ("what could you get if you didn't have to share weights at all?").
+    # Note: shake corpus overfits badly by iter ~2000; best val_loss is in the
+    # middle of training, not at iter 10000. Eval every 250 iters so we can find
+    # the best val_loss along the curve.
+    ("ungated-shake-only-10k",
+     "--variant ungated --n-iters 10000 --seed 1337 --eval-interval 250 --log-interval 100 --single-cohort shake"),
+
+    ("ungated-ts-only-10k",
+     "--variant ungated --n-iters 10000 --seed 1337 --eval-interval 250 --log-interval 100 --single-cohort ts"),
+
     ("fixed-mn-span0.3",
      "--variant fixed-mn --n-iters 10000 --span 0.3 --alpha-dist beta_half"),
 
