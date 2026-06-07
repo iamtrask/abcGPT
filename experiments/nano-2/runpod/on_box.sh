@@ -118,11 +118,16 @@ echo "background uploader PID: $UPLOADER_PID"
 # ------------------------------------------------------------------
 echo "--- train: variant=$VARIANT_NAME ---"
 cd "$REPO_DIR"
+# Run training but DON'T let `set -e` kill the script on failure — we want
+# to push the partial log.jsonl (with the excepthook crash record) AND the
+# on_box.log (with stderr traceback) to HF regardless of train.py exit code.
+TRAIN_EXIT=0
 # shellcheck disable=SC2086
 python3 experiments/nano-2/train.py \
     --variant-name "$VARIANT_NAME" \
     $TRAIN_ARGS \
-    --device cuda
+    --device cuda || TRAIN_EXIT=$?
+echo "--- train.py exited with code: $TRAIN_EXIT ---"
 
 # ------------------------------------------------------------------
 # 7. Stop the background uploader cleanly before the final upload.
@@ -132,11 +137,16 @@ kill "$UPLOADER_PID" 2>/dev/null || true
 wait "$UPLOADER_PID" 2>/dev/null || true
 
 # ------------------------------------------------------------------
-# 8. Final upload (whole folder including summary.json — the marker the
-#    orchestrator uses to know training is done and the pod can be killed).
+# 8. Final upload — push whole variant dir + on_box.log under DEBUG_LOGS/.
+#    Runs unconditionally so crashes leave a forensic trail on HF.
 # ------------------------------------------------------------------
-echo "--- final upload to HF (includes summary.json done-marker) ---"
-python3 - <<PYEOF
+echo "--- final upload to HF (includes summary.json done-marker on success, on_box.log always) ---"
+# Stage on_box.log inside the variant dir so upload_folder catches it.
+mkdir -p "$REPO_DIR/experiments/nano-2/results/$VARIANT_NAME"
+cp /tmp/on_box.log "$REPO_DIR/experiments/nano-2/results/$VARIANT_NAME/on_box.log" 2>/dev/null || true
+echo "$TRAIN_EXIT" > "$REPO_DIR/experiments/nano-2/results/$VARIANT_NAME/train_exit_code.txt"
+
+python3 - <<PYEOF || true
 import os, sys
 from huggingface_hub import HfApi, login, create_repo
 
@@ -153,11 +163,12 @@ api.upload_folder(
     path_in_repo="$VARIANT_NAME",
     repo_id="$HF_REPO",
     repo_type="model",
-    commit_message=f"nano-2: final results for variant '$VARIANT_NAME'",
+    commit_message=f"nano-2: results for variant '$VARIANT_NAME' (train_exit=$TRAIN_EXIT)",
 )
 print(f"uploaded {variant_dir} -> {('$HF_REPO')}/$VARIANT_NAME")
 PYEOF
 
 echo "==================================================================="
-echo "on_box.sh DONE at $(date)"
+echo "on_box.sh DONE at $(date) (train_exit=$TRAIN_EXIT)"
 echo "==================================================================="
+exit "$TRAIN_EXIT"
