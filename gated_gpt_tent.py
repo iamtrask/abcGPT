@@ -146,7 +146,12 @@ class _CorpusRoutedGate(torch.autograd.Function):
         return grad_output * gate_bwd, None, None, None, None
 
 
-def gate_with_corpus(x, M, alpha, corpus, narrowness=1.0, anneal_t=1.0):
+def _linear_gate(alpha, M):
+    """Linear gate: g(α, m) = m·α + (1−m)·(1−α). Monotone, min at exact endpoints."""
+    return M * alpha + (1.0 - M) * (1.0 - alpha)
+
+
+def gate_with_corpus(x, M, alpha, corpus, narrowness=1.0, anneal_t=1.0, gate_type='tent'):
     """Smooth tent-gate in forward, corpus-routed gate in backward.
 
     `anneal_t` ∈ [0, 1] interpolates between "no gating" and "full tent gating":
@@ -174,17 +179,20 @@ def gate_with_corpus(x, M, alpha, corpus, narrowness=1.0, anneal_t=1.0):
     t = anneal_t.item() if torch.is_tensor(anneal_t) else anneal_t
 
     def _gate(M_, learnable):
-        tent = _smooth_tent(alpha, M_, narrowness)
+        if gate_type == 'linear':
+            base = _linear_gate(alpha, M_)
+        else:
+            base = _smooth_tent(alpha, M_, narrowness)
         if t >= 1.0:
-            return tent
-        gate_fwd = (1.0 - t) + t * tent
+            return base
+        gate_fwd = (1.0 - t) + t * base
         if not learnable:
             # No assignment-learning to support; just use the blend directly.
             return gate_fwd
-        # STE trick: forward = linear blend (ungated when t=0); backward = full
-        # tent gradient flows to M. Scores learn the assignment from iter 0 at
-        # FULL strength even though the model trains like ungated during warmup.
-        return tent + (gate_fwd - tent).detach()
+        # STE trick: forward = anneal blend; backward = full gate gradient flows
+        # to M. Scores learn the assignment from iter 0 at FULL strength even
+        # though the model trains like ungated during warmup.
+        return base + (gate_fwd - base).detach()
 
     if corpus is None or not torch.is_grad_enabled():
         # eval path: M might be a buffer (boundary_mode / fixed-mn) or a learn-assign tensor.
@@ -227,6 +235,8 @@ class GatedGPTConfig:
     boundary_sharpness: float = 10.0  # sharpness of sigmoid transition. higher = sharper specialist/halfsie split.
     rank_beta_alpha: float = 0.5      # symmetric Beta(α, α) shape parameter for rank/mask sampling.
                                       # 0.5 = U-shape (default), 1.0 = uniform, 2.0 = bell.
+    gate_type: str = 'tent'           # 'tent' (default) = cos² bell centered at α=m (interior optima).
+                                      # 'linear' = m·α + (1−m)·(1−α) (monotone, min at exact endpoints).
     learn_assign_method: str = 'ste'  # 'ste' = hard argsort + straight-through (current default).
                                        # 'softsort' = differentiable approximation via soft permutation matrix
                                        # at temperature tau. Higher tau = smoother; lower → hard.
@@ -351,6 +361,7 @@ class GatedSelfAttention(nn.Module):
         self.head_dim = config.n_embd // config.n_head
         self.dropout = config.dropout
         self.narrowness = config.tent_narrowness
+        self.gate_type = config.gate_type
         self.trainable_masks = config.trainable_masks
         self.boundary_mode = config.boundary_mode
         self.boundary_sharpness = config.boundary_sharpness
@@ -420,10 +431,10 @@ class GatedSelfAttention(nn.Module):
             is_causal=True,
         )  # (B, H, T, hd)
         anneal_t = self.learn_assign_anneal_t if self.learned_assignment else 1.0
-        y = gate_with_corpus(y, self._M_head().view(1, self.n_head, 1, 1), alpha, corpus, self.narrowness, anneal_t=anneal_t)
+        y = gate_with_corpus(y, self._M_head().view(1, self.n_head, 1, 1), alpha, corpus, self.narrowness, anneal_t=anneal_t, gate_type=self.gate_type)
         y = y.transpose(1, 2).contiguous().view(B, T, C)
         out = self.c_proj(y)
-        out = gate_with_corpus(out, self._M_embd(), alpha, corpus, self.narrowness, anneal_t=anneal_t)
+        out = gate_with_corpus(out, self._M_embd(), alpha, corpus, self.narrowness, anneal_t=anneal_t, gate_type=self.gate_type)
         return self.resid_dropout(out)
 
 
@@ -435,6 +446,7 @@ class GatedMLP(nn.Module):
         self.c_proj = nn.Linear(4 * config.n_embd, config.n_embd, bias=config.bias)
         self.dropout = nn.Dropout(config.dropout)
         self.narrowness = config.tent_narrowness
+        self.gate_type = config.gate_type
         self.trainable_masks = config.trainable_masks
         self.boundary_mode = config.boundary_mode
         self.boundary_sharpness = config.boundary_sharpness
@@ -482,9 +494,9 @@ class GatedMLP(nn.Module):
     def forward(self, x: torch.Tensor, alpha: float, corpus) -> torch.Tensor:
         h = F.gelu(self.c_fc(x))                                                            # (B, T, 4D)
         anneal_t = self.learn_assign_anneal_t if self.learned_assignment else 1.0
-        h = gate_with_corpus(h, self._M_inner(), alpha, corpus, self.narrowness, anneal_t=anneal_t)  # MLP-inner gate
+        h = gate_with_corpus(h, self._M_inner(), alpha, corpus, self.narrowness, anneal_t=anneal_t, gate_type=self.gate_type)  # MLP-inner gate
         h = self.c_proj(h)
-        h = gate_with_corpus(h, self._M_embd(), alpha, corpus, self.narrowness, anneal_t=anneal_t)   # residual-stream gate
+        h = gate_with_corpus(h, self._M_embd(), alpha, corpus, self.narrowness, anneal_t=anneal_t, gate_type=self.gate_type)   # residual-stream gate
         return self.dropout(h)
 
 
@@ -507,6 +519,7 @@ class GatedGPT(nn.Module):
         super().__init__()
         self.config = config
         self.narrowness = config.tent_narrowness
+        self.gate_type = config.gate_type
         self.trainable_masks = config.trainable_masks
 
         self.boundary_mode = config.boundary_mode
@@ -637,14 +650,14 @@ class GatedGPT(nn.Module):
         anneal_t = self.learn_assign_anneal_t if self.learned_assignment else 1.0
         # Gate the initial residual stream (embedding output)
         x = self.transformer.wte(idx) + self.transformer.wpe(pos)
-        x = gate_with_corpus(x, M_embd, alpha, corpus, self.narrowness, anneal_t=anneal_t)
+        x = gate_with_corpus(x, M_embd, alpha, corpus, self.narrowness, anneal_t=anneal_t, gate_type=self.gate_type)
         x = self.transformer.drop(x)
         for block in self.transformer.h:
             x = block(x, alpha, corpus)
         # ln_f normalizes the residual stream; gate again so lm_head only sees
         # the active channels at this alpha
         x = self.transformer.ln_f(x)
-        x = gate_with_corpus(x, M_embd, alpha, corpus, self.narrowness, anneal_t=anneal_t)
+        x = gate_with_corpus(x, M_embd, alpha, corpus, self.narrowness, anneal_t=anneal_t, gate_type=self.gate_type)
         if targets is not None:
             logits = self.lm_head(x)
             loss = F.cross_entropy(logits.view(-1, logits.size(-1)), targets.view(-1), ignore_index=-1)

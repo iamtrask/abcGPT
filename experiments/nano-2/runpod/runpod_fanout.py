@@ -306,6 +306,68 @@ SWEEP_DEFAULT = [
 
     ("trainable-mn-span0.7",
      "--variant trainable-mn --n-iters 10000 --span 0.7 --mask-lr-ratio 1e-3 --lambda-var 0.1 --warmup-mn 0"),
+
+    # ========================================================================
+    # OVERNIGHT 2026-06-07: 12 variants testing hypotheses around the current
+    # best (la-bell-ramp9k sb=2.098). All include the RNG drift fix so they're
+    # clean baselines for future comparison.
+    # ========================================================================
+
+    # 1. Rerun current best with RNG-fixed train.py — clean baseline.
+    ("la-bell-ramp9k-rngfix",
+     "--variant fixed-mn --n-iters 10000 --span 1.0 --seed 1337 --eval-interval 500 --log-interval 250 --learned-assignment --learn-assign-anneal --rank-beta-alpha 2.0 --learn-assign-warmup-frac 0.10 --learn-assign-ramp-end-frac 0.90"),
+
+    # 2. Same recipe but U-shape rank distribution (extremes-favored) — does
+    #    pushing more neurons to m≈0/m≈1 give cleaner endpoint loss?
+    ("la-u-ramp9k",
+     "--variant fixed-mn --n-iters 10000 --span 1.0 --seed 1337 --eval-interval 500 --log-interval 250 --learned-assignment --learn-assign-anneal --rank-beta-alpha 0.5 --learn-assign-warmup-frac 0.10 --learn-assign-ramp-end-frac 0.90"),
+
+    # 3. U-shape + LINEAR gate — exact endpoint optima, monotone slider.
+    ("la-u-ramp9k-linear",
+     "--variant fixed-mn --n-iters 10000 --span 1.0 --seed 1337 --eval-interval 500 --log-interval 250 --learned-assignment --learn-assign-anneal --rank-beta-alpha 0.5 --learn-assign-warmup-frac 0.10 --learn-assign-ramp-end-frac 0.90 --gate-type linear"),
+
+    # 4. Bell + LINEAR gate — does linear help the current-best rank dist too?
+    ("la-bell-ramp9k-linear",
+     "--variant fixed-mn --n-iters 10000 --span 1.0 --seed 1337 --eval-interval 500 --log-interval 250 --learned-assignment --learn-assign-anneal --rank-beta-alpha 2.0 --learn-assign-warmup-frac 0.10 --learn-assign-ramp-end-frac 0.90 --gate-type linear"),
+
+    # 5. Freeze scores at iter 3000 (after 22% of ramp) — does early freeze
+    #    let weights specialize harder at a fixed assignment?
+    ("la-bell-ramp9k-freeze3k",
+     "--variant fixed-mn --n-iters 10000 --span 1.0 --seed 1337 --eval-interval 500 --log-interval 250 --learned-assignment --learn-assign-anneal --rank-beta-alpha 2.0 --learn-assign-warmup-frac 0.10 --learn-assign-ramp-end-frac 0.90 --freeze-scores-from-iter 3000"),
+
+    # 6. Freeze scores at iter 6000 (after ramp midpoint) — later freeze, more
+    #    score-learning before commitment.
+    ("la-bell-ramp9k-freeze6k",
+     "--variant fixed-mn --n-iters 10000 --span 1.0 --seed 1337 --eval-interval 500 --log-interval 250 --learned-assignment --learn-assign-anneal --rank-beta-alpha 2.0 --learn-assign-warmup-frac 0.10 --learn-assign-ramp-end-frac 0.90 --freeze-scores-from-iter 6000"),
+
+    # 7. Faster schedule: warmup 5% / ramp end 30% — commit by iter 3000 so
+    #    weights have 7k iters at full gate.
+    ("la-bell-warmup5-ramp30",
+     "--variant fixed-mn --n-iters 10000 --span 1.0 --seed 1337 --eval-interval 500 --log-interval 250 --learned-assignment --learn-assign-anneal --rank-beta-alpha 2.0 --learn-assign-warmup-frac 0.05 --learn-assign-ramp-end-frac 0.30"),
+
+    # 8. Slower schedule: warmup 20% / ramp end 80% — more ungated training
+    #    before any specialization commitment.
+    ("la-bell-warmup20-ramp80",
+     "--variant fixed-mn --n-iters 10000 --span 1.0 --seed 1337 --eval-interval 500 --log-interval 250 --learned-assignment --learn-assign-anneal --rank-beta-alpha 2.0 --learn-assign-warmup-frac 0.20 --learn-assign-ramp-end-frac 0.80"),
+
+    # 9. SoftSort tau=0.01 — much sharper than the 0.1/0.5/1.0 we tried (all
+    #    of which gave dead endpoints). Closer to hard argsort gradient.
+    ("la-bell-ramp9k-softsort-tau0.01",
+     "--variant fixed-mn --n-iters 10000 --span 1.0 --seed 1337 --eval-interval 500 --log-interval 250 --learned-assignment --learn-assign-anneal --rank-beta-alpha 2.0 --learn-assign-warmup-frac 0.10 --learn-assign-ramp-end-frac 0.90 --learn-assign-method softsort --learn-assign-softsort-tau 0.01"),
+
+    # 10. Bell + higher mask LR ratio (1.0 not 0.01) — scores update at same
+    #     rate as weights. Tests whether faster score learning helps.
+    ("la-bell-ramp9k-masklr1.0",
+     "--variant fixed-mn --n-iters 10000 --span 1.0 --seed 1337 --eval-interval 500 --log-interval 250 --learned-assignment --learn-assign-anneal --rank-beta-alpha 2.0 --learn-assign-warmup-frac 0.10 --learn-assign-ramp-end-frac 0.90 --mask-lr-ratio 1.0"),
+
+    # 11. U-shape + narrowed tent (span 1.3) — combines extremes-favored rank
+    #     with sharper per-neuron firing zones.
+    ("la-u-ramp9k-narrow1.3",
+     "--variant fixed-mn --n-iters 10000 --span 1.3 --seed 1337 --eval-interval 500 --log-interval 250 --learned-assignment --learn-assign-anneal --rank-beta-alpha 0.5 --learn-assign-warmup-frac 0.10 --learn-assign-ramp-end-frac 0.90"),
+
+    # 12. Plain fixed-mn baseline rerun with RNG-fixed train.py — reference.
+    ("fixed-mn-rngfix",
+     "--variant fixed-mn --n-iters 10000 --span 1.0 --seed 1337 --eval-interval 500 --log-interval 250"),
 ]
 
 

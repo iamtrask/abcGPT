@@ -202,6 +202,7 @@ def train_with_logging(
     learn_assign_anneal_cap=1.0,
     learn_assign_warmup_frac=0.10,
     learn_assign_ramp_end_frac=0.90,
+    freeze_scores_from_iter=-1,
     final_alpha_curve_points=11,
     single_cohort='none',
 ):
@@ -357,18 +358,30 @@ def train_with_logging(
     def estimate_val(get_batch_fn, alpha):
         if get_batch_fn is None:
             return None
-        model.eval()
-        losses = torch.zeros(eval_iters)
-        for k in range(eval_iters):
-            X, Y = get_batch_fn()
-            with torch.amp.autocast(device_type=device, dtype=amp_dtype):
-                if ungated:
-                    _, loss = model(X, Y)
-                else:
-                    _, loss = model(X, alpha, Y, corpus=None)
-            losses[k] = loss.item()
-        model.train()
-        return float(losses.mean())
+        # Save + restore RNG state so eval doesn't shift the training RNG sequence.
+        # Previously, eval batches consumed torch.randint draws from the same global
+        # RNG that training sample_alpha + Bernoulli + get_batch use — adding evals
+        # (or changing their count) silently changed the training trajectory across
+        # iters. This was the "cloud-vs-notebook gap" RNG drift bug.
+        cpu_state = torch.random.get_rng_state()
+        cuda_state = torch.cuda.get_rng_state() if torch.cuda.is_available() else None
+        try:
+            model.eval()
+            losses = torch.zeros(eval_iters)
+            for k in range(eval_iters):
+                X, Y = get_batch_fn()
+                with torch.amp.autocast(device_type=device, dtype=amp_dtype):
+                    if ungated:
+                        _, loss = model(X, Y)
+                    else:
+                        _, loss = model(X, alpha, Y, corpus=None)
+                losses[k] = loss.item()
+            model.train()
+            return float(losses.mean())
+        finally:
+            torch.random.set_rng_state(cpu_state)
+            if cuda_state is not None:
+                torch.cuda.set_rng_state(cuda_state)
 
     n_shake = 0
     n_ts = 0
@@ -476,6 +489,12 @@ def train_with_logging(
         # Warmup: zero mask gradients for first warmup_mn iters so weights find
         # their initial specialization before m_n starts drifting.
         if trainable_masks and warmup_mn > 0 and it < warmup_mn:
+            for p in mask_params:
+                if p.grad is not None:
+                    p.grad.zero_()
+        # Learn-assign: optionally freeze scores from a given iter onward
+        # (so weights keep training at a fixed assignment, mimicking fixed-mn).
+        if learned_assignment and freeze_scores_from_iter >= 0 and it >= freeze_scores_from_iter:
             for p in mask_params:
                 if p.grad is not None:
                     p.grad.zero_()
@@ -749,6 +768,18 @@ def main():
                    help='(learn-assign softsort) Temperature τ for soft permutation. '
                         'Smaller τ → sharper (closer to hard argsort). Larger τ → smoother. '
                         'Default 1.0; reasonable range 0.1 – 10.0.')
+    p.add_argument('--freeze-scores-from-iter', type=int, default=-1,
+                   help='(learn-assign) From this iter on, zero out gradient on M_*_scores '
+                        '(assignment frozen but weights keep training). Lets the model commit '
+                        'to a learned assignment then specialize hard at it, mimicking fixed-mn '
+                        'training time at the assignment. -1 = never freeze (default).')
+    p.add_argument('--gate-type', default='tent', choices=['tent', 'linear'],
+                   help='Gate function. "tent" (default, original): cos²((α−m)/span). Smooth bell '
+                        'centered at α=m. Has interior optima (best loss not at α=0 or 1 exactly). '
+                        '"linear": m·α + (1−m)·(1−α). Monotone, minimum at exact endpoints, no '
+                        'interior dips. Trade-off: linear halfsies always at gate=0.5 (less '
+                        'capacity differentiation by α); tent halfsies peak at α=0.5 (sharper '
+                        'differentiation but interior optima).')
     p.add_argument('--final-alpha-curve-points', type=int, default=11,
                    help='At end of training, sweep α ∈ linspace(0, 1, N) and eval val_loss for both '
                         'cohorts at each point. Captures the full slider quality curve so we can '
@@ -824,6 +855,7 @@ def main():
             learned_assignment=args.learned_assignment,
             learn_assign_method=args.learn_assign_method,
             learn_assign_softsort_tau=args.learn_assign_softsort_tau,
+            gate_type=args.gate_type,
         )
         model = GatedGPT(cfg).to(args.device)
         ungated = False
@@ -874,6 +906,7 @@ def main():
         learn_assign_ramp_end_frac=args.learn_assign_ramp_end_frac,
         final_alpha_curve_points=args.final_alpha_curve_points,
         single_cohort=args.single_cohort,
+        freeze_scores_from_iter=args.freeze_scores_from_iter,
     )
 
     # Save final summary + final m_n snapshot if applicable
