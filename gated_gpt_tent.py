@@ -234,11 +234,21 @@ def learn_assign_mask(scores, target_values, anneal_t=1.0):
     Returns:
         m: (n,) the mask values. Has the gradient of scores via STE.
     """
-    target_eff = 0.5 + anneal_t * (target_values - 0.5)
-    sorted_idx = torch.argsort(scores)             # rank ordering
-    m_hard = torch.empty_like(target_eff)
-    m_hard[sorted_idx] = target_eff                # neuron at rank-i gets target_eff[i]
-    return scores + (m_hard - scores).detach()     # STE: forward=m_hard, grad=scores
+    # Force fp32 + disable autocast for the STE math. Under bfloat16 autocast on
+    # CUDA, the combination of argsort + in-place permutation assignment +
+    # STE arithmetic crashes the container (observed: pods cycle, log only
+    # contains config record). Doing this in fp32 is correct anyway since
+    # the mask values are scalars in [0, 1] and argsort cares about ordering
+    # not magnitude.
+    with torch.amp.autocast(device_type=scores.device.type, enabled=False):
+        scores_f = scores.float()
+        tv_f = target_values.float()
+        t_val = float(anneal_t) if not torch.is_tensor(anneal_t) else float(anneal_t.item())
+        target_eff = 0.5 + t_val * (tv_f - 0.5)
+        sorted_idx = torch.argsort(scores_f)             # rank ordering
+        m_hard = torch.empty_like(target_eff)
+        m_hard[sorted_idx] = target_eff                  # neuron at rank-i gets target_eff[i]
+        return scores_f + (m_hard - scores_f).detach()   # STE: forward=m_hard, grad=scores
 
 
 def _beta_to_logit(m, eps=1e-4):
