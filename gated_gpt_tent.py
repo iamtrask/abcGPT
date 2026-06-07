@@ -171,18 +171,27 @@ def gate_with_corpus(x, M, alpha, corpus, narrowness=1.0, anneal_t=1.0):
     that don't need data-loss gradient — using it for learnable masks would
     silently zero their gradient (M's backward returns None there).
     """
-    def _blend(gate):
-        if anneal_t is None:
-            return gate
-        t = anneal_t.item() if torch.is_tensor(anneal_t) else anneal_t
+    t = anneal_t.item() if torch.is_tensor(anneal_t) else anneal_t
+
+    def _gate(M_, learnable):
+        tent = _smooth_tent(alpha, M_, narrowness)
         if t >= 1.0:
-            return gate
-        return (1.0 - t) + t * gate
+            return tent
+        gate_fwd = (1.0 - t) + t * tent
+        if not learnable:
+            # No assignment-learning to support; just use the blend directly.
+            return gate_fwd
+        # STE trick: forward = linear blend (ungated when t=0); backward = full
+        # tent gradient flows to M. Scores learn the assignment from iter 0 at
+        # FULL strength even though the model trains like ungated during warmup.
+        return tent + (gate_fwd - tent).detach()
 
     if corpus is None or not torch.is_grad_enabled():
-        return x * _blend(_smooth_tent(alpha, M, narrowness))
+        # eval path: M might be a buffer (boundary_mode / fixed-mn) or a learn-assign tensor.
+        # Either way, no backward — just use the forward blend.
+        return x * _gate(M, learnable=False)
     if M.requires_grad:
-        return x * _blend(_smooth_tent(alpha, M, narrowness))
+        return x * _gate(M, learnable=True)
     # _CorpusRoutedGate path is for buffer-only masks (fixed-mn, boundary_mode)
     # — they don't use the anneal blend.
     return _CorpusRoutedGate.apply(x, M, alpha, corpus, narrowness)
