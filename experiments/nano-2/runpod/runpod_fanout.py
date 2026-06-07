@@ -206,6 +206,26 @@ SWEEP_DEFAULT = [
     ("la-v2-beta-bell",
      "--variant fixed-mn --n-iters 10000 --span 1.0 --seed 1337 --eval-interval 500 --log-interval 250 --learned-assignment --learn-assign-anneal --rank-beta-alpha 2.0"),
 
+    # RAMP-END SWEEP: anneal completes earlier in training so the model has
+    # time to settle into the committed configuration before overfitting kicks
+    # in. Empirical: with default 90% ramp, la-beta-bell peaked at iter 6500
+    # with anneal_t≈0.69 then degraded as anneal_t climbed past peak. Compress
+    # the anneal into the early productive window.
+    #
+    # All 4 use la-beta-bell base config (winning variant from la-v2 sweep)
+    # with cap=1.0. Only difference is when anneal completes (warmup→ramp_end).
+    ("la-bell-ramp3k",
+     "--variant fixed-mn --n-iters 10000 --span 1.0 --seed 1337 --eval-interval 500 --log-interval 250 --learned-assignment --learn-assign-anneal --rank-beta-alpha 2.0 --learn-assign-warmup-frac 0.05 --learn-assign-ramp-end-frac 0.30"),
+
+    ("la-bell-ramp5k",
+     "--variant fixed-mn --n-iters 10000 --span 1.0 --seed 1337 --eval-interval 500 --log-interval 250 --learned-assignment --learn-assign-anneal --rank-beta-alpha 2.0 --learn-assign-warmup-frac 0.05 --learn-assign-ramp-end-frac 0.50"),
+
+    ("la-bell-ramp7k",
+     "--variant fixed-mn --n-iters 10000 --span 1.0 --seed 1337 --eval-interval 500 --log-interval 250 --learned-assignment --learn-assign-anneal --rank-beta-alpha 2.0 --learn-assign-warmup-frac 0.10 --learn-assign-ramp-end-frac 0.70"),
+
+    ("la-bell-ramp9k",
+     "--variant fixed-mn --n-iters 10000 --span 1.0 --seed 1337 --eval-interval 500 --log-interval 250 --learned-assignment --learn-assign-anneal --rank-beta-alpha 2.0 --learn-assign-warmup-frac 0.10 --learn-assign-ramp-end-frac 0.90"),
+
     # SINGLE-SOURCE CEILINGS: ungated model trained on ONE cohort only, for the
     # same 10k iter budget as nano-2 joint runs. Gives the true per-cohort floor
     # ("what could you get if you didn't have to share weights at all?").

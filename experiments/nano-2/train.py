@@ -200,6 +200,9 @@ def train_with_logging(
     learn_assign_anneal_start=0.05,
     learn_assign_anneal_end=1.0,
     learn_assign_anneal_cap=1.0,
+    learn_assign_warmup_frac=0.10,
+    learn_assign_ramp_end_frac=0.90,
+    final_alpha_curve_points=11,
     single_cohort='none',
 ):
     """Same logic as gated_gpt_tent.train_gated, but writes a structured JSONL log.
@@ -407,9 +410,8 @@ def train_with_logging(
         # plateau at cap for final 10% (committed roles get to settle in).
         # Cap defaults to 0.75 — ramping fully to 1.0 collapses endpoint-α eval.
         if learn_assign_anneal and getattr(model, 'learned_assignment', False):
-            warmup_iters = int(0.10 * n_iters)
-            settle_iters = int(0.10 * n_iters)
-            ramp_end = n_iters - settle_iters
+            warmup_iters = int(learn_assign_warmup_frac * n_iters)
+            ramp_end = int(learn_assign_ramp_end_frac * n_iters)
             cap = learn_assign_anneal_cap
             if it < warmup_iters:
                 t_val = 0.0
@@ -598,6 +600,24 @@ def train_with_logging(
                   f"corpus split: {n_shake}/{n_ts}{la_suffix}", flush=True)
 
     total_s = time.time() - t_start
+
+    # Final alpha-curve eval — slider quality measurement. Sweep α uniformly,
+    # eval val_loss on each cohort at each α. Captures the full U-curve shape
+    # (or its absence) so we can identify which variants produce meaningful
+    # sliders vs flat ones.
+    if final_alpha_curve_points and final_alpha_curve_points > 0:
+        N = final_alpha_curve_points
+        print(f"--- final alpha-curve eval: {N} points × 2 cohorts × {eval_iters} batches each ---", flush=True)
+        alpha_curve = []
+        # numpy.linspace not imported here; use simple manual linspace
+        alphas = [i / (N - 1) for i in range(N)] if N > 1 else [0.5]
+        for a in alphas:
+            sh = estimate_val(get_shake_val, alpha=a)
+            ts = estimate_val(get_ts_val, alpha=a)
+            alpha_curve.append({'alpha': a, 'shake_val': sh, 'ts_val': ts})
+            print(f"  alpha={a:.3f}  shake_val={sh:.4f}  ts_val={ts:.4f}", flush=True)
+        emit({'type': 'alpha_curve', 'iter': n_iters, 'eval_iters': eval_iters, 'points': alpha_curve})
+
     emit({
         'type': 'done',
         'iter': n_iters,
@@ -711,10 +731,20 @@ def main():
     p.add_argument('--learn-assign-anneal-cap', type=float, default=1.0,
                    help='(learn-assign anneal) Max anneal_t the schedule ramps to. Default 1.0 — '
                         'matches the end-state gate strength of fixed-mn and pert-* variants for '
-                        'apples-to-apples comparison. Caveat: cap=1.0 with bell-distributed targets '
-                        'AND narrowness=1 collapses endpoint-α eval (m≈0.5 neurons fire only at α=0.5). '
-                        'Use cap < 1.0 if combining bell rank-α with narrowness=1; or use U-shape '
-                        'targets (rank-α=0.5) which have specialists that fire at endpoints.')
+                        'apples-to-apples comparison.')
+    p.add_argument('--learn-assign-warmup-frac', type=float, default=0.10,
+                   help='(learn-assign anneal) Fraction of total iters used as pure-ungated warmup. '
+                        'Default 0.10 (= iter 0–1000 for n_iters=10000).')
+    p.add_argument('--learn-assign-ramp-end-frac', type=float, default=0.90,
+                   help='(learn-assign anneal) Fraction of total iters at which anneal_t reaches cap. '
+                        'Default 0.90 (= iter 9000 for n_iters=10000). Lower this to compress the '
+                        'anneal into the early productive window so commitment happens before the '
+                        'model starts overfitting. E.g. 0.30 → anneal completes by iter 3000.')
+    p.add_argument('--final-alpha-curve-points', type=int, default=11,
+                   help='At end of training, sweep α ∈ linspace(0, 1, N) and eval val_loss for both '
+                        'cohorts at each point. Captures the full slider quality curve so we can '
+                        'measure which variants produce meaningful sliders (big alpha→loss swing) '
+                        'vs flat ones (slider does nothing). Logged as alpha_curve record.')
     # Device + smoke
     p.add_argument('--device', default='cuda' if torch.cuda.is_available() else 'cpu')
     p.add_argument('--amp-dtype', default='bfloat16', choices=['bfloat16', 'float16', 'float32'])
@@ -829,6 +859,9 @@ def main():
         learn_assign_anneal_start=args.learn_assign_anneal_start,
         learn_assign_anneal_end=args.learn_assign_anneal_end,
         learn_assign_anneal_cap=args.learn_assign_anneal_cap,
+        learn_assign_warmup_frac=args.learn_assign_warmup_frac,
+        learn_assign_ramp_end_frac=args.learn_assign_ramp_end_frac,
+        final_alpha_curve_points=args.final_alpha_curve_points,
         single_cohort=args.single_cohort,
     )
 
