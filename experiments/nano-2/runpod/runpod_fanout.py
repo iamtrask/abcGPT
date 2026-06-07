@@ -240,6 +240,24 @@ SWEEP_DEFAULT = [
     ("la-bell-ramp9k-softsort-tau1.0",
      "--variant fixed-mn --n-iters 10000 --span 1.0 --seed 1337 --eval-interval 500 --log-interval 250 --learned-assignment --learn-assign-anneal --rank-beta-alpha 2.0 --learn-assign-warmup-frac 0.10 --learn-assign-ramp-end-frac 0.90 --learn-assign-method softsort --learn-assign-softsort-tau 1.0"),
 
+    # CAP/NARROWNESS TRADE-OFF SWEEP: la-bell-ramp9k with reduced commitment
+    # (lower cap) and/or wider tents (higher narrowness). Goal: trade some
+    # slider gap for lower slider-best loss to beat notebook (1.981).
+    ("la-bell-9k-cap0.85",
+     "--variant fixed-mn --n-iters 10000 --span 1.0 --seed 1337 --eval-interval 500 --log-interval 250 --learned-assignment --learn-assign-anneal --rank-beta-alpha 2.0 --learn-assign-warmup-frac 0.10 --learn-assign-ramp-end-frac 0.90 --learn-assign-anneal-cap 0.85"),
+
+    ("la-bell-9k-cap0.7",
+     "--variant fixed-mn --n-iters 10000 --span 1.0 --seed 1337 --eval-interval 500 --log-interval 250 --learned-assignment --learn-assign-anneal --rank-beta-alpha 2.0 --learn-assign-warmup-frac 0.10 --learn-assign-ramp-end-frac 0.90 --learn-assign-anneal-cap 0.7"),
+
+    ("la-bell-9k-narrow1.3",
+     "--variant fixed-mn --n-iters 10000 --span 1.3 --seed 1337 --eval-interval 500 --log-interval 250 --learned-assignment --learn-assign-anneal --rank-beta-alpha 2.0 --learn-assign-warmup-frac 0.10 --learn-assign-ramp-end-frac 0.90"),
+
+    ("la-bell-9k-narrow1.5",
+     "--variant fixed-mn --n-iters 10000 --span 1.5 --seed 1337 --eval-interval 500 --log-interval 250 --learned-assignment --learn-assign-anneal --rank-beta-alpha 2.0 --learn-assign-warmup-frac 0.10 --learn-assign-ramp-end-frac 0.90"),
+
+    ("la-bell-9k-cap0.85-narrow1.3",
+     "--variant fixed-mn --n-iters 10000 --span 1.3 --seed 1337 --eval-interval 500 --log-interval 250 --learned-assignment --learn-assign-anneal --rank-beta-alpha 2.0 --learn-assign-warmup-frac 0.10 --learn-assign-ramp-end-frac 0.90 --learn-assign-anneal-cap 0.85"),
+
     # SINGLE-SOURCE CEILINGS: ungated model trained on ONE cohort only, for the
     # same 10k iter budget as nano-2 joint runs. Gives the true per-cohort floor
     # ("what could you get if you didn't have to share weights at all?").
