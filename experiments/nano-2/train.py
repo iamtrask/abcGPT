@@ -587,9 +587,15 @@ def train_with_logging(
                 la_suffix = (f"  | la: t={la_diag['anneal_t']:.3f} "
                              f"drift={la_diag['avg_score_drift_L2']:.3f} "
                              f"rank_corr={la_diag['avg_rank_corr_init']:+.3f}")
-            print(f"  >>> step {it+1}: shake@a=1.0={v_sh_1:.3f}  ts@a=0.0={v_ts_0:.3f}  "
-                  f"shake@a=0.5={v_sh_5:.3f}  ts@a=0.5={v_ts_5:.3f}  "
-                  f"corpus split so far: {n_shake} shake / {n_ts} ts{la_suffix}", flush=True)
+            # Print the full val_loss_matrix as a 2x3 grid so the cross-cohort
+            # endpoints (shake@a=0.0, ts@a=1.0) are visible alongside the
+            # matched + middle cases. Those cross-endpoints are the dramatic
+            # parts of the alpha→val_loss U-curve; omitting them made alpha
+            # look like it didn't matter much in live logs.
+            print(f"  >>> step {it+1}:  "
+                  f"shake@a={{0.0:{v_sh_0:.3f}, 0.5:{v_sh_5:.3f}, 1.0:{v_sh_1:.3f}}}  "
+                  f"ts@a={{0.0:{v_ts_0:.3f}, 0.5:{v_ts_5:.3f}, 1.0:{v_ts_1:.3f}}}  "
+                  f"corpus split: {n_shake}/{n_ts}{la_suffix}", flush=True)
 
     total_s = time.time() - t_start
     emit({
