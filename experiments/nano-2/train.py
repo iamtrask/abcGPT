@@ -342,6 +342,25 @@ def train_with_logging(
     t_start = time.time()
     t_log = t_start
 
+    # Install a crash-logger so any unhandled exception gets written to
+    # log.jsonl (background uploader pushes to HF in ≤60s). Otherwise cloud
+    # pod crashes are invisible — saw this in the la-* CUDA debug saga.
+    import sys as _sys, traceback as _tb
+    _prev_hook = _sys.excepthook
+    def _crash_logger(exctype, value, tb):
+        try:
+            log_fp.write(json.dumps({
+                'type': 'error',
+                'error_class': exctype.__name__,
+                'error_msg': str(value),
+                'traceback': ''.join(_tb.format_exception(exctype, value, tb)),
+            }) + '\n')
+            log_fp.flush()
+        except Exception:
+            pass
+        _prev_hook(exctype, value, tb)
+    _sys.excepthook = _crash_logger
+
     for it in range(n_iters):
         cur_lr = apply_lr(it)
 
