@@ -146,8 +146,20 @@ class _CorpusRoutedGate(torch.autograd.Function):
         return grad_output * gate_bwd, None, None, None, None
 
 
-def gate_with_corpus(x, M, alpha, corpus, narrowness=1.0):
+def gate_with_corpus(x, M, alpha, corpus, narrowness=1.0, anneal_t=1.0):
     """Smooth tent-gate in forward, corpus-routed gate in backward.
+
+    `anneal_t` ∈ [0, 1] interpolates between "no gating" and "full tent gating":
+        gate_effective = (1 - anneal_t) + anneal_t * tent(α, M, narrowness)
+    - anneal_t = 0: gate = 1 everywhere → every neuron fully active for every α.
+                    Model behaves like a non-gated GPT during this phase, so all
+                    weights learn from both cohorts. (Mask gradient via STE is
+                    still nonzero through the tent contribution, so scores can
+                    accumulate ranking signal even during the "ungated" warmup.)
+    - anneal_t = 1: gate = tent — full specialization committed.
+    Used by the learn-assign mechanism to ramp specialization in gradually
+    instead of starting committed. For non-learn-assign variants, callers leave
+    anneal_t=1.0 and the blend is a no-op.
 
     If `corpus is None` (or x doesn't need grad), reduces to a plain multiply
     with the smooth tent-gate (used at eval time so we don't pay for
@@ -159,10 +171,20 @@ def gate_with_corpus(x, M, alpha, corpus, narrowness=1.0):
     that don't need data-loss gradient — using it for learnable masks would
     silently zero their gradient (M's backward returns None there).
     """
+    def _blend(gate):
+        if anneal_t is None:
+            return gate
+        t = anneal_t.item() if torch.is_tensor(anneal_t) else anneal_t
+        if t >= 1.0:
+            return gate
+        return (1.0 - t) + t * gate
+
     if corpus is None or not torch.is_grad_enabled():
-        return x * _smooth_tent(alpha, M, narrowness)
+        return x * _blend(_smooth_tent(alpha, M, narrowness))
     if M.requires_grad:
-        return x * _smooth_tent(alpha, M, narrowness)
+        return x * _blend(_smooth_tent(alpha, M, narrowness))
+    # _CorpusRoutedGate path is for buffer-only masks (fixed-mn, boundary_mode)
+    # — they don't use the anneal blend.
     return _CorpusRoutedGate.apply(x, M, alpha, corpus, narrowness)
 
 
@@ -205,49 +227,46 @@ class GatedGPTConfig:
                                       # exclusive with boundary_mode and trainable_masks.
 
 
-def learn_assign_mask(scores, target_values, anneal_t=1.0):
+def learn_assign_mask(scores, target_values):
     """Hard distribution-preserving assignment with straight-through estimator.
 
     Forward:
-        target_eff = 0.5 + anneal_t * (target_values − 0.5)
-        Neuron at the i-th lowest score gets target_eff[i]. The resulting m_n
-        distribution is EXACTLY target_eff — every value appears once, no
-        more, no less. Which neuron gets which value is determined by `scores`.
-
-        anneal_t = 1.0 (default): full target shape (committed).
-        anneal_t = 0.0:           every target collapses to 0.5 (all neurons
-                                  fully mixed, no specialization possible).
-        Anneal 0 → 1 over training to "force the overall distribution to
-        unmix, while the model learns which neurons should go where."
+        Neuron at the i-th lowest score gets target_values[i]. The resulting
+        m_n distribution is EXACTLY target_values — every value appears once.
+        Which neuron gets which value is determined by `scores`.
 
     Backward:
-        Hard assignment is non-differentiable (argsort). We use the
-        straight-through estimator: ∂L/∂m flows through to scores as if the
-        assignment were identity. So the optimizer treats the mask value
-        gradient as a "push my score up/down" signal on each neuron.
+        Hard assignment is non-differentiable (argsort). STE: ∂L/∂m flows to
+        scores as if the assignment were identity. The optimizer treats the
+        mask-value gradient as a "push my score up/down" signal on each neuron.
+
+    Note: this used to also take an `anneal_t` arg that collapsed target_values
+    toward 0.5 early in training. That was the WRONG end to anneal — at
+    narrowness=1, m≈0.5 gives a tent that fires only at α=0.5, so cohort-
+    endpoint training (α=0 or 1) saw ~zero neuron activation and couldn't
+    learn. Annealing now happens on GATE STRENGTH instead (see gate_with_corpus
+    anneal_t arg), which starts the model in "pure ungated" mode and gradually
+    introduces specialization. Mask distribution stays at full target shape.
 
     Args:
         scores:        (n,) learnable tensor. Higher score = higher m_n.
         target_values: (n,) sorted, fixed. The committed distribution shape.
-        anneal_t:      scalar in [0, 1]. Multiplier on deviation from 0.5.
 
     Returns:
         m: (n,) the mask values. Has the gradient of scores via STE.
     """
     # Force fp32 + disable autocast for the STE math. Under bfloat16 autocast on
     # CUDA, the combination of argsort + in-place permutation assignment +
-    # STE arithmetic crashes the container (observed: pods cycle, log only
-    # contains config record). Doing this in fp32 is correct anyway since
+    # STE arithmetic crashed the container (observed: pods cycled, log only
+    # contained config record). Doing this in fp32 is correct anyway since
     # the mask values are scalars in [0, 1] and argsort cares about ordering
     # not magnitude.
     with torch.amp.autocast(device_type=scores.device.type, enabled=False):
         scores_f = scores.float()
         tv_f = target_values.float()
-        t_val = float(anneal_t) if not torch.is_tensor(anneal_t) else float(anneal_t.item())
-        target_eff = 0.5 + t_val * (tv_f - 0.5)
         sorted_idx = torch.argsort(scores_f)             # rank ordering
-        m_hard = torch.empty_like(target_eff)
-        m_hard[sorted_idx] = target_eff                  # neuron at rank-i gets target_eff[i]
+        m_hard = torch.empty_like(tv_f)
+        m_hard[sorted_idx] = tv_f                        # neuron at rank-i gets target[i]
         return scores_f + (m_hard - scores_f).detach()   # STE: forward=m_hard, grad=scores
 
 
@@ -316,7 +335,7 @@ class GatedSelfAttention(nn.Module):
         if self.boundary_mode:
             return torch.sigmoid((self.M_head_ranks - self.M_head_boundary) * self.boundary_sharpness)
         if self.learned_assignment:
-            return learn_assign_mask(self.M_head_scores, self.M_head_target, self.learn_assign_anneal_t)
+            return learn_assign_mask(self.M_head_scores, self.M_head_target)
         if self.trainable_masks:
             return torch.sigmoid(self.M_head_logits)
         return self.M_head
@@ -325,7 +344,7 @@ class GatedSelfAttention(nn.Module):
         if self.boundary_mode:
             return torch.sigmoid((self.M_embd_ranks - self.M_embd_boundary) * self.boundary_sharpness)
         if self.learned_assignment:
-            return learn_assign_mask(self.M_embd_scores, self.M_embd_target, self.learn_assign_anneal_t)
+            return learn_assign_mask(self.M_embd_scores, self.M_embd_target)
         if self.trainable_masks:
             return torch.sigmoid(self.M_embd_logits)
         return self.M_embd
@@ -341,10 +360,11 @@ class GatedSelfAttention(nn.Module):
             dropout_p=self.dropout if self.training else 0.0,
             is_causal=True,
         )  # (B, H, T, hd)
-        y = gate_with_corpus(y, self._M_head().view(1, self.n_head, 1, 1), alpha, corpus, self.narrowness)
+        anneal_t = self.learn_assign_anneal_t if self.learned_assignment else 1.0
+        y = gate_with_corpus(y, self._M_head().view(1, self.n_head, 1, 1), alpha, corpus, self.narrowness, anneal_t=anneal_t)
         y = y.transpose(1, 2).contiguous().view(B, T, C)
         out = self.c_proj(y)
-        out = gate_with_corpus(out, self._M_embd(), alpha, corpus, self.narrowness)
+        out = gate_with_corpus(out, self._M_embd(), alpha, corpus, self.narrowness, anneal_t=anneal_t)
         return self.resid_dropout(out)
 
 
@@ -384,7 +404,7 @@ class GatedMLP(nn.Module):
         if self.boundary_mode:
             return torch.sigmoid((self.M_inner_ranks - self.M_inner_boundary) * self.boundary_sharpness)
         if self.learned_assignment:
-            return learn_assign_mask(self.M_inner_scores, self.M_inner_target, self.learn_assign_anneal_t)
+            return learn_assign_mask(self.M_inner_scores, self.M_inner_target)
         if self.trainable_masks:
             return torch.sigmoid(self.M_inner_logits)
         return self.M_inner
@@ -393,16 +413,17 @@ class GatedMLP(nn.Module):
         if self.boundary_mode:
             return torch.sigmoid((self.M_embd_ranks - self.M_embd_boundary) * self.boundary_sharpness)
         if self.learned_assignment:
-            return learn_assign_mask(self.M_embd_scores, self.M_embd_target, self.learn_assign_anneal_t)
+            return learn_assign_mask(self.M_embd_scores, self.M_embd_target)
         if self.trainable_masks:
             return torch.sigmoid(self.M_embd_logits)
         return self.M_embd
 
     def forward(self, x: torch.Tensor, alpha: float, corpus) -> torch.Tensor:
         h = F.gelu(self.c_fc(x))                                                            # (B, T, 4D)
-        h = gate_with_corpus(h, self._M_inner(), alpha, corpus, self.narrowness)            # MLP-inner gate
+        anneal_t = self.learn_assign_anneal_t if self.learned_assignment else 1.0
+        h = gate_with_corpus(h, self._M_inner(), alpha, corpus, self.narrowness, anneal_t=anneal_t)  # MLP-inner gate
         h = self.c_proj(h)
-        h = gate_with_corpus(h, self._M_embd(), alpha, corpus, self.narrowness)             # residual-stream gate
+        h = gate_with_corpus(h, self._M_embd(), alpha, corpus, self.narrowness, anneal_t=anneal_t)   # residual-stream gate
         return self.dropout(h)
 
 
@@ -483,7 +504,7 @@ class GatedGPT(nn.Module):
         if self.boundary_mode:
             return torch.sigmoid((self.M_embd_ranks - self.M_embd_boundary) * self.boundary_sharpness)
         if self.learned_assignment:
-            return learn_assign_mask(self.M_embd_scores, self.M_embd_target, self.learn_assign_anneal_t)
+            return learn_assign_mask(self.M_embd_scores, self.M_embd_target)
         if self.trainable_masks:
             return torch.sigmoid(self.M_embd_logits)
         return self.M_embd
@@ -550,16 +571,17 @@ class GatedGPT(nn.Module):
         # Compute the sigmoid-decoded M_embd once per forward (trainable case);
         # for fixed buffers _M_embd() returns the buffer directly.
         M_embd = self._M_embd()
+        anneal_t = self.learn_assign_anneal_t if self.learned_assignment else 1.0
         # Gate the initial residual stream (embedding output)
         x = self.transformer.wte(idx) + self.transformer.wpe(pos)
-        x = gate_with_corpus(x, M_embd, alpha, corpus, self.narrowness)
+        x = gate_with_corpus(x, M_embd, alpha, corpus, self.narrowness, anneal_t=anneal_t)
         x = self.transformer.drop(x)
         for block in self.transformer.h:
             x = block(x, alpha, corpus)
         # ln_f normalizes the residual stream; gate again so lm_head only sees
         # the active channels at this alpha
         x = self.transformer.ln_f(x)
-        x = gate_with_corpus(x, M_embd, alpha, corpus, self.narrowness)
+        x = gate_with_corpus(x, M_embd, alpha, corpus, self.narrowness, anneal_t=anneal_t)
         if targets is not None:
             logits = self.lm_head(x)
             loss = F.cross_entropy(logits.view(-1, logits.size(-1)), targets.view(-1), ignore_index=-1)

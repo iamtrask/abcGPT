@@ -364,10 +364,21 @@ def train_with_logging(
     for it in range(n_iters):
         cur_lr = apply_lr(it)
 
-        # learn-assign anneal schedule — exponential ramp from start → end over n_iters.
+        # learn-assign anneal schedule — gate-strength blend, NOT mask-value collapse.
+        # anneal_t=0 → gate is identity (model trains like ungated, all neurons active);
+        # anneal_t=1 → gate is full tent (specialization committed).
+        # Schedule: pure ungated for first 10% iters, linear ramp to 1.0 over middle 80%,
+        # full gating for final 10% so the committed roles get to settle in.
         if learn_assign_anneal and getattr(model, 'learned_assignment', False):
-            progress = it / max(1, n_iters - 1)
-            t_val = learn_assign_anneal_start * (learn_assign_anneal_end / learn_assign_anneal_start) ** progress
+            warmup_iters = int(0.10 * n_iters)
+            settle_iters = int(0.10 * n_iters)
+            ramp_end = n_iters - settle_iters
+            if it < warmup_iters:
+                t_val = 0.0
+            elif it < ramp_end:
+                t_val = (it - warmup_iters) / max(1, ramp_end - warmup_iters)
+            else:
+                t_val = 1.0
             model.set_learn_assign_anneal(t_val)
 
         balance_pen = None  # populated only in balance-penalty mode
@@ -758,6 +769,7 @@ def main():
         learn_assign_anneal=args.learn_assign_anneal,
         learn_assign_anneal_start=args.learn_assign_anneal_start,
         learn_assign_anneal_end=args.learn_assign_anneal_end,
+        single_cohort=args.single_cohort,
     )
 
     # Save final summary + final m_n snapshot if applicable
