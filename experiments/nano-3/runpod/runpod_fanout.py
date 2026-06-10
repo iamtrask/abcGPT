@@ -35,6 +35,7 @@ DEFAULT_HF_REPO = "iamtrask/abcGPT-nano-3"
 # Reads in nano-3/train.py as: n_layer=6, n_head=6, n_embd=384, block_size=256
 # (the train.py defaults). Override per-variant when ablating.
 COMMON = "--n-iters 10000 --seed 1337 --log-interval 250 --eval-interval 500 --eval-iters 200"
+N5_DATA = "--data-dir data/shake_ts_code_sql_md_char"
 
 
 # The first nano-3 sweep. 10 variants:
@@ -130,6 +131,44 @@ SWEEP_DEFAULT = [
     ("hypernet-singletons-full-noanchor",
      f"--variant hypernet {COMMON} --d-embed 8 --rank 16 --init singletons "
      f"--lambda-anchor 0.0 --warmstart-iters 1000 --gate-attention --gate-embedding"),
+
+    # ============================================================================
+    # SIZE SWEEP (sweep #3, 2026-06-10): scale ungated up to match the gated
+    # variants' parameter count + scale gated further up to test slider scaling.
+    # ============================================================================
+
+    ("ungated-8L-512d",
+     f"--variant ungated {COMMON} --n-layer 8 --n-head 8 --n-embd 512"),
+
+    ("ungated-12L-768d",
+     f"--variant ungated {COMMON} --n-layer 12 --n-head 12 --n-embd 768"),
+
+    ("hypernet-singletons-full-8L-512d",
+     f"--variant hypernet {COMMON} --d-embed 8 --rank 16 --init singletons "
+     f"--lambda-anchor 0.01 --warmstart-iters 1000 --gate-attention --gate-embedding "
+     f"--n-layer 8 --n-head 8 --n-embd 512"),
+
+    ("hypernet-singletons-full-12L-768d",
+     f"--variant hypernet {COMMON} --d-embed 8 --rank 16 --init singletons "
+     f"--lambda-anchor 0.01 --warmstart-iters 1000 --gate-attention --gate-embedding "
+     f"--n-layer 12 --n-head 12 --n-embd 768"),
+
+    # ============================================================================
+    # N=5 COHORT SWEEP (sweep #4, 2026-06-10): does the slider scale from N=3
+    # to N=5? Adds SQL + markdown cohorts. Uses --data-dir to point at the new
+    # 5-cohort prep.
+    # ============================================================================
+
+    ("n5-ungated-10k",
+     f"--variant ungated {COMMON} {N5_DATA}"),
+
+    ("n5-hypernet-singletons-full",
+     f"--variant hypernet {COMMON} {N5_DATA} --d-embed 8 --rank 16 --init singletons "
+     f"--lambda-anchor 0.01 --warmstart-iters 1000 --gate-attention --gate-embedding"),
+
+    ("n5-per_weight-singletons-full",
+     f"--variant per_weight {COMMON} {N5_DATA} --init singletons --lambda-anchor 0.01 "
+     f"--gate-attention --gate-embedding"),
 ]
 
 
