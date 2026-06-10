@@ -158,6 +158,7 @@ def train_run(args):
         gate_attention=args.gate_attention,
         gate_embedding=args.gate_embedding,
         base_rank=args.base_rank,
+        adaptive_capacity=args.adaptive_capacity,
     )
 
     torch.manual_seed(args.seed)
@@ -327,6 +328,14 @@ def train_run(args):
         elif it < args.alpha_curriculum_until:
             c_idx = int(rng.integers(n_cohorts))
             alpha_np = np.zeros(n_cohorts, dtype=np.float32); alpha_np[c_idx] = 1.0
+        elif args.mid_edge_prob > 0 and rng.random() < args.mid_edge_prob:
+            # Phase 1.7: mid-edge sample — alpha = 0.5/0.5 mix of two random cohorts.
+            # Directly trains midpoint composition behavior.
+            i, j = rng.choice(n_cohorts, 2, replace=False)
+            alpha_np = np.zeros(n_cohorts, dtype=np.float32)
+            alpha_np[i] = 0.5; alpha_np[j] = 0.5
+            # Pick which cohort's data to use for this step (either is reasonable)
+            c_idx = int(rng.choice([i, j]))
         else:
             alpha_np = rng.dirichlet([1.0] * n_cohorts).astype(np.float32)
             c_idx = int(rng.choice(n_cohorts, p=alpha_np))
@@ -471,6 +480,14 @@ def main():
                    help="(lora variant only) If > 0, factorize each gated linear's base "
                         "weight as A@B^T at this rank instead of full rank. Forces more "
                         "capacity into per-cohort deltas. -1 (default) = full-rank base.")
+    p.add_argument("--adaptive-capacity", action="store_true",
+                   help="(lora variant only, Phase 1.7) Each gated linear gets learnable "
+                        "per-cohort capacity scalars (softmax-normalized, fixed budget) and "
+                        "a base scaling factor. Model auto-allocates capacity.")
+    p.add_argument("--mid-edge-prob", type=float, default=0.0,
+                   help="(Phase 1.7) Probability of sampling alpha as 0.5/0.5 mix of two "
+                        "random cohorts during the Dirichlet phase. Directly trains midpoint "
+                        "behavior. 0 = standard Dirichlet; 0.2 recommended for adaptive runs.")
     # Training
     p.add_argument("--n-iters", type=int, default=10000)
     p.add_argument("--lr", type=float, default=1e-3)

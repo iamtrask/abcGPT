@@ -49,6 +49,11 @@ class NanoGPTConfig:
     # base weight as A @ B.T (rank=base_rank) instead of a full (out × in)
     # matrix. Forces more representation capacity into per-cohort deltas.
     base_rank: int = -1               # -1 = full rank (no change)
+    # Phase 1.7: continuous adaptive capacity allocation. If True, each
+    # LoRAAdditiveLinear gets learnable per-cohort capacity scalars (softmax-
+    # normalized to fixed budget) and a base scaling factor. Lets the model
+    # auto-allocate where capacity is needed.
+    adaptive_capacity: bool = False
 
 
 # ---------------------------------------------------------------------------
@@ -68,7 +73,8 @@ def make_linear(cfg, in_features, out_features, gated):
     if cfg.variant == "lora":
         return LoRAAdditiveLinear(in_features, out_features, cfg.n_cohorts,
                                     rank=cfg.rank, bias=cfg.bias,
-                                    base_rank=cfg.base_rank)
+                                    base_rank=cfg.base_rank,
+                                    adaptive_capacity=cfg.adaptive_capacity)
     raise ValueError(f"unknown variant: {cfg.variant}")
 
 
@@ -304,7 +310,7 @@ class LoRAAdditiveLinear(nn.Module):
     """
 
     def __init__(self, in_features, out_features, n_cohorts, rank=16, bias=False,
-                  base_rank=-1):
+                  base_rank=-1, adaptive_capacity=False):
         super().__init__()
         self.in_features = in_features
         self.out_features = out_features
@@ -330,6 +336,14 @@ class LoRAAdditiveLinear(nn.Module):
         self.U = nn.Parameter(torch.empty(n_cohorts, out_features, rank))
         self.V = nn.Parameter(torch.zeros(n_cohorts, in_features, rank))
         nn.init.normal_(self.U, std=0.02)
+        # Phase 1.7: adaptive capacity allocation
+        self.adaptive_capacity = adaptive_capacity
+        if adaptive_capacity:
+            # Per-cohort capacity scalars in log-space (init=0 → softmax-normalized cap=1.0)
+            # softmax(zeros)*N = (1/N, 1/N, ...) * N = (1, 1, ...)
+            self.cohort_log_caps = nn.Parameter(torch.zeros(n_cohorts))
+            # Base scaling factor in log-space (init=0 → scale=1.0)
+            self.base_log_cap = nn.Parameter(torch.zeros(1))
 
     def _W_shared(self):
         if self.base_rank > 0:
@@ -337,8 +351,17 @@ class LoRAAdditiveLinear(nn.Module):
         return self.weight
 
     def forward(self, x, alpha):
-        delta = torch.einsum('c,cor,cir->oi', alpha, self.U, self.V)
-        return F.linear(x, self._W_shared() + delta, self.bias)
+        if self.adaptive_capacity:
+            # Per-cohort caps: softmax over log-caps → normalize to fixed budget
+            cohort_caps = F.softmax(self.cohort_log_caps, dim=0) * self.n_cohorts
+            # Base scaling: exp of log_cap (init=1.0)
+            base_scale = torch.exp(self.base_log_cap)
+            delta = torch.einsum('c,c,cor,cir->oi',
+                                  alpha, cohort_caps, self.U, self.V)
+            return F.linear(x, base_scale * self._W_shared() + delta, self.bias)
+        else:
+            delta = torch.einsum('c,cor,cir->oi', alpha, self.U, self.V)
+            return F.linear(x, self._W_shared() + delta, self.bias)
 
 
 class LoRAAdditiveFFN(nn.Module):
@@ -361,7 +384,7 @@ class LoRAAdditiveEmbedding(nn.Module):
     the init code in train.py walks all gated layers uniformly. (Though
     LoRA-additive doesn't actually need stratified init.)
     """
-    def __init__(self, vocab_size, n_embd, n_cohorts, rank=16):
+    def __init__(self, vocab_size, n_embd, n_cohorts, rank=16, adaptive_capacity=False):
         super().__init__()
         self.vocab_size = vocab_size
         self.n_embd = n_embd
@@ -374,10 +397,21 @@ class LoRAAdditiveEmbedding(nn.Module):
         self.U = nn.Parameter(torch.empty(n_cohorts, vocab_size, rank))
         self.V = nn.Parameter(torch.zeros(n_cohorts, n_embd, rank))
         nn.init.normal_(self.U, std=0.02)
+        self.adaptive_capacity = adaptive_capacity
+        if adaptive_capacity:
+            self.cohort_log_caps = nn.Parameter(torch.zeros(n_cohorts))
+            self.base_log_cap = nn.Parameter(torch.zeros(1))
 
     def _W_eff(self, alpha):
-        delta = torch.einsum('c,cor,cir->oi', alpha, self.U, self.V)
-        return self.weight + delta
+        if self.adaptive_capacity:
+            cohort_caps = F.softmax(self.cohort_log_caps, dim=0) * self.n_cohorts
+            base_scale = torch.exp(self.base_log_cap)
+            delta = torch.einsum('c,c,cor,cir->oi',
+                                  alpha, cohort_caps, self.U, self.V)
+            return base_scale * self.weight + delta
+        else:
+            delta = torch.einsum('c,cor,cir->oi', alpha, self.U, self.V)
+            return self.weight + delta
 
     def embed(self, idx, alpha):
         return F.embedding(idx, self._W_eff(alpha))
@@ -446,7 +480,8 @@ class NanoGPT(nn.Module):
                                                             cfg.d_embed, cfg.rank)
             elif cfg.variant == "lora":
                 self.gated_embed = LoRAAdditiveEmbedding(cfg.vocab_size, cfg.n_embd, cfg.n_cohorts,
-                                                          rank=cfg.rank)
+                                                          rank=cfg.rank,
+                                                          adaptive_capacity=cfg.adaptive_capacity)
             else:
                 raise ValueError(f"gate_embedding=True with unsupported variant {cfg.variant}")
             self.wte = None  # not used; gated_embed.embed/project replace it

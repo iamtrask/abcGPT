@@ -325,6 +325,38 @@ SWEEP_DEFAULT = [
 
     ("n3-lora-baseR4-r512-full",
      f"--variant lora {COMMON} --rank 512 --base-rank 4 --gate-attention --gate-embedding"),
+
+    # ============================================================================
+    # PHASE 1.7: adaptive capacity allocation (sweep #11, 2026-06-10)
+    # Andrew's "shift capacity from base to cohorts based on training signals"
+    # idea. Each gated linear gets per-cohort capacity scalars (softmax-normalized
+    # to fixed budget) + base scaling factor. Loss gradients reallocate.
+    # ============================================================================
+
+    # Adaptive at the best-known LoRA sweet spot
+    ("n3-lora-baseR8-r64-full-adaptive",
+     f"--variant lora {COMMON} --rank 64 --base-rank 8 --adaptive-capacity "
+     f"--gate-attention --gate-embedding"),
+
+    # Adaptive at the moderate-base sweet spot
+    ("n3-lora-baseR16-r128-full-adaptive",
+     f"--variant lora {COMMON} --rank 128 --base-rank 16 --adaptive-capacity "
+     f"--gate-attention --gate-embedding"),
+
+    # Adaptive at the ensemble-limit (does it recover diag?)
+    ("n3-lora-baseR2-r128-full-adaptive",
+     f"--variant lora {COMMON} --rank 128 --base-rank 2 --adaptive-capacity "
+     f"--gate-attention --gate-embedding"),
+
+    # Adaptive + explicit mid-edge sampling (Phase 1.7-full mechanism)
+    ("n3-lora-baseR8-r64-full-adaptive-midedge",
+     f"--variant lora {COMMON} --rank 64 --base-rank 8 --adaptive-capacity "
+     f"--mid-edge-prob 0.2 --gate-attention --gate-embedding"),
+
+    # Adaptive on N=5 (test if balance fixes the failed N=5 case)
+    ("n5-lora-baseR8-r64-full-adaptive",
+     f"--variant lora {COMMON} {N5_DATA} --rank 64 --base-rank 8 --adaptive-capacity "
+     f"--gate-attention --gate-embedding"),
 ]
 
 
