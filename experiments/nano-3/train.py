@@ -157,6 +157,7 @@ def train_run(args):
         cohort_names=cohort_names,
         gate_attention=args.gate_attention,
         gate_embedding=args.gate_embedding,
+        base_rank=args.base_rank,
     )
 
     torch.manual_seed(args.seed)
@@ -466,6 +467,10 @@ def main():
     p.add_argument("--bias", action="store_true")
     p.add_argument("--d-embed", type=int, default=8)
     p.add_argument("--rank", type=int, default=16)
+    p.add_argument("--base-rank", type=int, default=-1,
+                   help="(lora variant only) If > 0, factorize each gated linear's base "
+                        "weight as A@B^T at this rank instead of full rank. Forces more "
+                        "capacity into per-cohort deltas. -1 (default) = full-rank base.")
     # Training
     p.add_argument("--n-iters", type=int, default=10000)
     p.add_argument("--lr", type=float, default=1e-3)

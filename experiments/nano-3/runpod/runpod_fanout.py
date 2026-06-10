@@ -248,6 +248,33 @@ SWEEP_DEFAULT = [
     # N=3, rank=16, FFN-only (tests whether LoRA needs full gating coverage)
     ("n3-lora-r16-ffn-only",
      f"--variant lora {COMMON} --rank 16"),
+
+    # ============================================================================
+    # PHASE 1.5: capacity asymmetry (sweep #8, 2026-06-10)
+    # Phase 1 confirmed: LoRA at full base rank has weak contrast — the base
+    # absorbs cohort-distinct behavior into shared weights. Test: shrink base
+    # rank to force cohort deltas to do more work.
+    # ============================================================================
+
+    # Full-rank base (Phase 1 r=16 baseline — re-listed for direct comparison)
+    # Already exists as n3-lora-r16-full; not relaunching.
+
+    # Base rank 256 (modest reduction from 384 natural rank)
+    ("n3-lora-baseR256-r16-full",
+     f"--variant lora {COMMON} --rank 16 --base-rank 256 --gate-attention --gate-embedding"),
+
+    # Base rank 128 (half capacity)
+    ("n3-lora-baseR128-r16-full",
+     f"--variant lora {COMMON} --rank 16 --base-rank 128 --gate-attention --gate-embedding"),
+
+    # Base rank 64 (quarter capacity) — likely too small; tests breakdown
+    ("n3-lora-baseR64-r16-full",
+     f"--variant lora {COMMON} --rank 16 --base-rank 64 --gate-attention --gate-embedding"),
+
+    # Base rank 128 with higher cohort rank (32) — give cohorts room to fill
+    # the gap when base is starved
+    ("n3-lora-baseR128-r32-full",
+     f"--variant lora {COMMON} --rank 32 --base-rank 128 --gate-attention --gate-embedding"),
 ]
 
 

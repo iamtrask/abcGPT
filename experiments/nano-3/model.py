@@ -45,6 +45,10 @@ class NanoGPTConfig:
     # "Gate everything" knobs — default False keeps prior nano-3 results valid
     gate_attention: bool = False      # gate c_attn (Q/K/V) + attn.c_proj
     gate_embedding: bool = False      # gate the tied wte/lm_head matrix
+    # Phase 1.5: capacity asymmetry. If > 0, factorize each gated linear's
+    # base weight as A @ B.T (rank=base_rank) instead of a full (out × in)
+    # matrix. Forces more representation capacity into per-cohort deltas.
+    base_rank: int = -1               # -1 = full rank (no change)
 
 
 # ---------------------------------------------------------------------------
@@ -63,7 +67,8 @@ def make_linear(cfg, in_features, out_features, gated):
                                      cfg.d_embed, cfg.rank, bias=cfg.bias)
     if cfg.variant == "lora":
         return LoRAAdditiveLinear(in_features, out_features, cfg.n_cohorts,
-                                    rank=cfg.rank, bias=cfg.bias)
+                                    rank=cfg.rank, bias=cfg.bias,
+                                    base_rank=cfg.base_rank)
     raise ValueError(f"unknown variant: {cfg.variant}")
 
 
@@ -291,29 +296,49 @@ class HypernetFFN(nn.Module):
 # has no uniformity-collapse failure mode).
 # ---------------------------------------------------------------------------
 class LoRAAdditiveLinear(nn.Module):
-    """W_eff = W + Σ_c α_c · (U_c @ V_c^T). Per-cohort low-rank deltas."""
+    """W_eff = W_shared + Σ_c α_c · (U_c @ V_c^T). Per-cohort low-rank deltas.
 
-    def __init__(self, in_features, out_features, n_cohorts, rank=16, bias=False):
+    Phase 1.5: optionally make W_shared itself low-rank (base_A @ base_B^T,
+    rank = base_rank). Forces more representation capacity into per-cohort
+    deltas — tests the "non-slider capacity overflow" hypothesis.
+    """
+
+    def __init__(self, in_features, out_features, n_cohorts, rank=16, bias=False,
+                  base_rank=-1):
         super().__init__()
         self.in_features = in_features
         self.out_features = out_features
         self.n_cohorts = n_cohorts
         self.rank = rank
-        # Shared base weight (same as nn.Linear)
-        self.weight = nn.Parameter(torch.empty(out_features, in_features))
-        nn.init.kaiming_uniform_(self.weight, a=math.sqrt(5))
+        # Cap base_rank at the natural rank limit; -1 = full rank
+        if base_rank <= 0 or base_rank >= min(in_features, out_features):
+            self.base_rank = -1
+            self.weight = nn.Parameter(torch.empty(out_features, in_features))
+            nn.init.kaiming_uniform_(self.weight, a=math.sqrt(5))
+            self.base_A = None
+            self.base_B = None
+        else:
+            # Low-rank base: W_shared = base_A @ base_B^T
+            self.base_rank = base_rank
+            self.base_A = nn.Parameter(torch.empty(out_features, base_rank))
+            self.base_B = nn.Parameter(torch.empty(in_features, base_rank))
+            nn.init.kaiming_uniform_(self.base_A, a=math.sqrt(5))
+            nn.init.kaiming_uniform_(self.base_B, a=math.sqrt(5))
+            self.weight = None
         self.bias = nn.Parameter(torch.zeros(out_features)) if bias else None
         # Per-cohort low-rank factors
         self.U = nn.Parameter(torch.empty(n_cohorts, out_features, rank))
         self.V = nn.Parameter(torch.zeros(n_cohorts, in_features, rank))
-        # LoRA-standard init: U random small, V zero → ΔW = 0 at start
         nn.init.normal_(self.U, std=0.02)
 
+    def _W_shared(self):
+        if self.base_rank > 0:
+            return self.base_A @ self.base_B.T
+        return self.weight
+
     def forward(self, x, alpha):
-        # alpha: (n_cohorts,)
-        # delta: (out, in)
         delta = torch.einsum('c,cor,cir->oi', alpha, self.U, self.V)
-        return F.linear(x, self.weight + delta, self.bias)
+        return F.linear(x, self._W_shared() + delta, self.bias)
 
 
 class LoRAAdditiveFFN(nn.Module):
