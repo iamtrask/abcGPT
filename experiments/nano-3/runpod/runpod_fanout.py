@@ -275,6 +275,31 @@ SWEEP_DEFAULT = [
     # the gap when base is starved
     ("n3-lora-baseR128-r32-full",
      f"--variant lora {COMMON} --rank 32 --base-rank 128 --gate-attention --gate-embedding"),
+
+    # ============================================================================
+    # PHASE 1.5b: aggressive base-rank reduction (sweep #9, 2026-06-10)
+    # Phase 1.5 showed monotone trend (smaller base → bigger contrast) but
+    # gradients gentle. Push to extreme small base values + compensating cohort
+    # ranks to find inflection point.
+    # ============================================================================
+
+    ("n3-lora-baseR32-r16-full",
+     f"--variant lora {COMMON} --rank 16 --base-rank 32 --gate-attention --gate-embedding"),
+
+    ("n3-lora-baseR16-r16-full",
+     f"--variant lora {COMMON} --rank 16 --base-rank 16 --gate-attention --gate-embedding"),
+
+    ("n3-lora-baseR8-r16-full",
+     f"--variant lora {COMMON} --rank 16 --base-rank 8 --gate-attention --gate-embedding"),
+
+    ("n3-lora-baseR32-r64-full",
+     f"--variant lora {COMMON} --rank 64 --base-rank 32 --gate-attention --gate-embedding"),
+
+    ("n3-lora-baseR8-r64-full",
+     f"--variant lora {COMMON} --rank 64 --base-rank 8 --gate-attention --gate-embedding"),
+
+    ("n3-lora-baseR2-r128-full",
+     f"--variant lora {COMMON} --rank 128 --base-rank 2 --gate-attention --gate-embedding"),
 ]
 
 
