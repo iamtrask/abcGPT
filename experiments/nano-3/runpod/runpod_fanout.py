@@ -568,6 +568,64 @@ SWEEP_DEFAULT = [
      f"--cap-lr-multiplier 20.0 "
      f"--gate-attention --gate-embedding "
      f"--n-layer 8 --n-head 8 --n-embd 512"),
+
+    # ============================================================================
+    # PHASE 4.1: CORNER-BIASED α SAMPLING (sweep, 2026-06-10 PM)
+    #
+    # Andrew's read on the running Phase-4 pod: "looks good but doesn't prefer
+    # corners enough." Root cause: after the 1k one-hot curriculum, α is drawn
+    # from Dirichlet(1,1,1) = UNIFORM over the simplex, which visits the vertices
+    # (the only points the slider is evaluated at) at measure zero. So contrast
+    # stays shallow (~0.06-0.11 nats/column on n3-lora-baseR8-r64-full) and decays
+    # over the LR tail.
+    #
+    # NOTE the nano-2 "Uniform beats Beta_half, don't concentrate at corners"
+    # finding does NOT transfer here: that failure mode was a starved off-SLOT in
+    # the dual-slot scheme. In LoRA-per-cohort the batch corpus is matched to α
+    # (p=alpha_np), so a corner gives the active adapter FULL gradient on its own
+    # data — no starvation. Corner-concentration is the right lever for this mech.
+    #
+    # Two new knobs in train.py: --alpha-concentration (Dirichlet conc <1 piles
+    # mass on the simplex boundary = corners+edges) and --corner-prob (hold a
+    # fraction of post-curriculum steps at pure one-hot). cohort_contrast_lambda
+    # is kept at 0 so the win is attributable to SAMPLING alone, not an aux loss.
+    #
+    # Built on the running Phase-4 winner geometry (8L-512d, baseR8-r64) so it's
+    # apples-to-apples against n3-lora-8L-512d-baseR8-r64-* already on HF.
+    # ============================================================================
+
+    # Pure Dirichlet-boundary: conc=0.3, no explicit corner injection. Isolates
+    # the concentration knob.
+    ("n3-lora-8L-512d-baseR8-r64-conc0.3",
+     f"--variant lora {COMMON} --rank 64 --base-rank 8 --adaptive-capacity "
+     f"--alpha-concentration 0.3 "
+     f"--gate-attention --gate-embedding "
+     f"--n-layer 8 --n-head 8 --n-embd 512"),
+
+    # Explicit corner injection: 30% of post-curriculum steps held at one-hot,
+    # interior still uniform. Isolates the corner-prob knob.
+    ("n3-lora-8L-512d-baseR8-r64-corner0.3",
+     f"--variant lora {COMMON} --rank 64 --base-rank 8 --adaptive-capacity "
+     f"--corner-prob 0.3 "
+     f"--gate-attention --gate-embedding "
+     f"--n-layer 8 --n-head 8 --n-embd 512"),
+
+    # The recommended combo: boundary-concentrated Dirichlet + 25% corner hold +
+    # mid-edge coverage so the 2-cohort blends don't hollow out. This is the
+    # "train the corners more, keep the edges coherent" recipe.
+    ("n3-lora-8L-512d-baseR8-r64-corner0.25-conc0.3-mid0.2",
+     f"--variant lora {COMMON} --rank 64 --base-rank 8 --adaptive-capacity "
+     f"--corner-prob 0.25 --alpha-concentration 0.3 --mid-edge-prob 0.2 "
+     f"--gate-attention --gate-embedding "
+     f"--n-layer 8 --n-head 8 --n-embd 512"),
+
+    # Aggressive corner preference: conc=0.15 + 40% corner hold. Tests whether
+    # pushing harder keeps sharpening contrast or starts hollowing the slider mid.
+    ("n3-lora-8L-512d-baseR8-r64-corner0.4-conc0.15",
+     f"--variant lora {COMMON} --rank 64 --base-rank 8 --adaptive-capacity "
+     f"--corner-prob 0.4 --alpha-concentration 0.15 "
+     f"--gate-attention --gate-embedding "
+     f"--n-layer 8 --n-head 8 --n-embd 512"),
 ]
 
 

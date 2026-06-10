@@ -450,6 +450,9 @@ def train_run(args):
         "d_embed": args.d_embed, "rank": args.rank,
         "init": args.init, "lambda_anchor": args.lambda_anchor,
         "alpha_curriculum_until": args.alpha_curriculum_until,
+        "alpha_concentration": args.alpha_concentration,
+        "corner_prob": args.corner_prob,
+        "mid_edge_prob": args.mid_edge_prob,
         "warmstart_iters": args.warmstart_iters,
         "seed": args.seed,
         "n_params": n_params,
@@ -498,6 +501,16 @@ def train_run(args):
         elif it < args.alpha_curriculum_until:
             c_idx = int(rng.integers(n_cohorts))
             alpha_np = np.zeros(n_cohorts, dtype=np.float32); alpha_np[c_idx] = 1.0
+        elif args.corner_prob > 0 and rng.random() < args.corner_prob:
+            # Phase 4.1: keep reinforcing pure corners past the curriculum window.
+            # The corners are the only α the slider is evaluated at, but Dirichlet
+            # sampling visits the vertices at measure zero — so the long post-
+            # curriculum tail erodes contrast (the "slider weakens with training"
+            # finding). Holding a fraction of steps at one-hot, with the batch
+            # corpus matched to the corner, gives the active cohort's adapter full
+            # gradient on its own data and counters that decay.
+            c_idx = int(rng.integers(n_cohorts))
+            alpha_np = np.zeros(n_cohorts, dtype=np.float32); alpha_np[c_idx] = 1.0
         elif args.mid_edge_prob > 0 and rng.random() < args.mid_edge_prob:
             # Phase 1.7: mid-edge sample — alpha = 0.5/0.5 mix of two random cohorts.
             # Directly trains midpoint composition behavior.
@@ -507,7 +520,11 @@ def train_run(args):
             # Pick which cohort's data to use for this step (either is reasonable)
             c_idx = int(rng.choice([i, j]))
         else:
-            alpha_np = rng.dirichlet([1.0] * n_cohorts).astype(np.float32)
+            # Phase 4.1: --alpha-concentration < 1 pushes Dirichlet mass onto the
+            # simplex BOUNDARY (corners + edges), skipping only the deep interior
+            # the slider is never evaluated at. =1.0 is the original uniform sampler.
+            alpha_np = rng.dirichlet(
+                [args.alpha_concentration] * n_cohorts).astype(np.float32)
             c_idx = int(rng.choice(n_cohorts, p=alpha_np))
         cohort = cohort_names[c_idx]
         n_per_cohort[cohort] += 1
@@ -672,6 +689,18 @@ def main():
                    help="(Phase 1.7) Probability of sampling alpha as 0.5/0.5 mix of two "
                         "random cohorts during the Dirichlet phase. Directly trains midpoint "
                         "behavior. 0 = standard Dirichlet; 0.2 recommended for adaptive runs.")
+    p.add_argument("--alpha-concentration", type=float, default=1.0,
+                   help="(Phase 4.1) Dirichlet concentration for post-curriculum α sampling. "
+                        "1.0 = uniform over the simplex (original). <1 concentrates mass on "
+                        "the simplex BOUNDARY (corners + edges), training the corner operating "
+                        "points the slider is evaluated at instead of the deep interior. "
+                        "0.3 recommended for sharper corner preference.")
+    p.add_argument("--corner-prob", type=float, default=0.0,
+                   help="(Phase 4.1) Probability a post-curriculum step samples a pure one-hot "
+                        "corner (batch corpus matched to it) instead of Dirichlet/mid-edge. "
+                        "Counters the contrast decay over the LR-decay tail. Checked BEFORE "
+                        "mid-edge, so the effective mid-edge rate is (1-corner_prob)*mid_edge_prob. "
+                        "0.25-0.3 recommended alongside --alpha-concentration<1.")
     p.add_argument("--load-caps-from", default="",
                    help="(Phase 1.8) Path to a previous run's model.pt. Loads ONLY the "
                         "cohort_log_caps and base_log_cap params from each gated layer, "
