@@ -468,6 +468,60 @@ SWEEP_DEFAULT = [
      f"--variant lora {COMMON} --rank 256 --base-rank 8 "
      f"--load-balance-lambda 0.01 "
      f"--gate-attention --gate-embedding"),
+
+    # ============================================================================
+    # PHASE 3: BIAS-ANCHOR mechanism (hard-α-gated additive residual-stream bias)
+    #
+    # Hypothesis: existing slider mechanisms (hypernet/LoRA) have a path through
+    # which the model can soft-ignore α — either via sigmoid saturation in the
+    # gate (hypernet) or by learning small per-cohort deltas (LoRA). The
+    # bias-anchor mechanism adds, at every layer, residual += α @ B_layer where
+    # B_layer is a learned (N, d_model) matrix. α is a hard linear coefficient
+    # (no sigmoid, no learned function-of-α), B is initialized to zero so iter-0
+    # behavior matches the un-anchored baseline. The training-time gradient on B
+    # pushes it away from zero per-cohort, giving every layer an unambiguous
+    # α signal. Should fix the prompt-anchoring failure documented in the
+    # qualitative samples (TinyStories attractor basin).
+    #
+    # Composes with any --variant. We sweep across the strongest base recipes:
+    #   - n3-hypernet-singletons-full (prior champion, contrast=+0.508)
+    #   - n3-hybrid-d8-r16-lora64    (Phase 2 winner, contrast=+0.587)
+    #   - n3-lora-baseR8-r64-full    (LoRA reference, contrast=+0.252)
+    #   - n3-ungated-biasanchor      (PURE bias-anchor; no other slider — isolates
+    #                                 the mechanism's contribution)
+    #   - n5-lora-r32-full           (BIG SURPRISE per qualitative — contrast=0.004
+    #                                 but decisive style switches)
+    #   - n5-hybrid-d8-r16-lora32    (N=5 contrast leader, +0.551)
+    # ============================================================================
+
+    ("n3-hypernet-singletons-full-biasanchor",
+     f"--variant hypernet {COMMON} --d-embed 8 --rank 16 --init singletons "
+     f"--lambda-anchor 0.01 --warmstart-iters 1000 --bias-anchor "
+     f"--gate-attention --gate-embedding"),
+
+    ("n3-hybrid-d8-r16-lora64-biasanchor",
+     f"--variant hybrid {COMMON} --d-embed 8 --rank 16 --hybrid-lora-rank 64 "
+     f"--init singletons --lambda-anchor 0.01 --warmstart-iters 1000 "
+     f"--bias-anchor --gate-attention --gate-embedding"),
+
+    ("n3-lora-baseR8-r64-full-biasanchor",
+     f"--variant lora {COMMON} --rank 64 --base-rank 8 --bias-anchor "
+     f"--gate-attention --gate-embedding"),
+
+    # Pure bias-anchor: ungated weights, only the additive bias gives α a path.
+    # Isolates the mechanism's standalone contribution.
+    ("n3-ungated-biasanchor",
+     f"--variant ungated {COMMON} --bias-anchor"),
+
+    ("n5-lora-r32-full-biasanchor",
+     f"--variant lora {COMMON} {N5_DATA} --rank 32 --bias-anchor "
+     f"--gate-attention --gate-embedding"),
+
+    ("n5-hybrid-d8-r16-lora32-biasanchor",
+     f"--variant hybrid {COMMON} {N5_DATA} --d-embed 8 --rank 16 "
+     f"--hybrid-lora-rank 32 --init singletons --lambda-anchor 0.01 "
+     f"--warmstart-iters 1000 --bias-anchor "
+     f"--gate-attention --gate-embedding"),
 ]
 
 

@@ -258,6 +258,7 @@ def train_run(args):
         adaptive_capacity=args.adaptive_capacity,
         hybrid_lora_rank=args.hybrid_lora_rank,
         rslora=args.rslora,
+        bias_anchor=args.bias_anchor,
     )
 
     torch.manual_seed(args.seed)
@@ -687,6 +688,11 @@ def main():
     p.add_argument("--rslora", action="store_true",
                    help="(Phase 2.1, Kalajdzievski 2023) Use α/sqrt(r) scaling on LoRA deltas "
                         "instead of α/r. Helps stability at high cohort rank.")
+    p.add_argument("--bias-anchor", action="store_true",
+                   help="(Phase 3) Add per-layer per-cohort hard-α-gated additive bias "
+                        "injection: residual += α @ B_layer where B_layer is (N, d_model). "
+                        "Init to zero. Coexists with --variant. Gives an unambiguous α "
+                        "signal at every layer that the model cannot soft-ignore. ")
     p.add_argument("--hat-temp-start", type=float, default=1.0,
                    help="(Phase 2.1, HAT for hypernet/hybrid only) Starting gate-temperature "
                         "at iter 0. Default 1.0 = no annealing. Set to 0.2 for soft gates "

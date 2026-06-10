@@ -63,6 +63,12 @@ class NanoGPTConfig:
     # Phase 2.1: rsLoRA scaling (Kalajdzievski 2023). If True, LoRA deltas are
     # divided by sqrt(rank) for stable high-rank training.
     rslora: bool = False
+    # Phase 3: bias-anchor mechanism. If True, every block gets a hard-α-gated
+    # additive bias injection: residual += α @ B_layer where B_layer is (N, d).
+    # Coexists with any other variant (including ungated). Provides an
+    # unambiguous, learnable, hard-gated α signal at every layer that the model
+    # cannot soft-ignore. Init to zero so baseline behavior is preserved at iter 0.
+    bias_anchor: bool = False
 
 
 # ---------------------------------------------------------------------------
@@ -575,6 +581,22 @@ class LayerNorm(nn.Module):
         return F.layer_norm(x, self.weight.shape, self.weight, self.bias, 1e-5)
 
 
+class CohortBias(nn.Module):
+    """Phase 3: hard-α-gated additive bias injection.
+
+    Stores a learnable (N, d) matrix; at forward, adds α @ B to the residual stream.
+    α is a hard linear coefficient — no sigmoid, no learned function-of-α between
+    input and gate value. Init to zero so iter-0 behavior matches the un-anchored
+    baseline.
+    """
+    def __init__(self, n_cohorts, d_model):
+        super().__init__()
+        self.B = nn.Parameter(torch.zeros(n_cohorts, d_model))
+
+    def forward(self, alpha):
+        return alpha @ self.B  # (B, d) if alpha is (B, N), else (d,)
+
+
 class Block(nn.Module):
     def __init__(self, cfg: NanoGPTConfig):
         super().__init__()
@@ -594,8 +616,13 @@ class Block(nn.Module):
             self.ffn = HybridFFN(cfg)
         else:
             raise ValueError(f"unknown variant: {cfg.variant}")
+        self.bias_inject = CohortBias(cfg.n_cohorts, cfg.n_embd) if cfg.bias_anchor else None
 
     def forward(self, x, alpha=None, cohort_embeddings=None):
+        if self.bias_inject is not None and alpha is not None:
+            bias = self.bias_inject(alpha)
+            bias = bias[None, None, :] if bias.dim() == 1 else bias[:, None, :]
+            x = x + bias
         x = x + self.attn(self.ln1(x), alpha, cohort_embeddings)
         h = self.ln2(x)
         if self.variant == "ungated":
