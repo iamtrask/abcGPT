@@ -40,7 +40,10 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from model import (NanoGPT, NanoGPTConfig,
                      PerWeightGatedLinear, HypernetGatedLinear,
-                     PerWeightFFN, HypernetFFN)
+                     PerWeightFFN, HypernetFFN,
+                     LoRAAdditiveLinear, LoRAAdditiveEmbedding,
+                     HybridGatedLinear,
+                     FactorizedHypernet)
 
 
 # ---------------------------------------------------------------------------
@@ -130,6 +133,100 @@ def warmstart_hypernet_layer(model, layer: HypernetGatedLinear, target,
 
 
 # ---------------------------------------------------------------------------
+# Phase 2.1: literature-driven aux losses + HAT temperature scheduling
+# ---------------------------------------------------------------------------
+def _iter_lora_cohort_modules(model):
+    """Yield every module in `model` that has per-cohort LoRA factors (U, V)
+    matching shapes (n_cohorts, *, rank). Covers LoRAAdditiveLinear,
+    LoRAAdditiveEmbedding, and HybridGatedLinear."""
+    for mod in model.modules():
+        if isinstance(mod, (LoRAAdditiveLinear, LoRAAdditiveEmbedding,
+                              HybridGatedLinear)):
+            yield mod
+
+
+def cohort_contrast_loss(model):
+    """Concept-Sliders cohort-contrast: maximize pairwise Frobenius distance
+    between each cohort's delta matrix ΔW_c = U_c @ V_c^T.
+
+    For C cohorts there are C*(C-1)/2 unordered pairs. We average across pairs
+    AND across layers so the coefficient λ has consistent meaning regardless of
+    model depth or N_cohorts.
+
+    Returns a scalar tensor. NEGATIVE so gradient descent INCREASES inter-cohort
+    distance — i.e. the loss is `-mean_pairs ||ΔW_c - ΔW_d||_F^2`.
+    """
+    total = 0.0
+    n_layers = 0
+    for mod in _iter_lora_cohort_modules(model):
+        U = mod.U  # (C, out, r)
+        V = mod.V  # (C, in, r)
+        C = U.shape[0]
+        if C < 2:
+            continue
+        # Compute ΔW_c = U_c @ V_c^T for all cohorts at once: (C, out, in).
+        # For large embedding layers (vocab × n_embd) this is the heavy step;
+        # acceptable because the einsum below at training step is already O(C * out * in * r).
+        delta = torch.einsum('cor,cir->coi', U, V)
+        # Pairwise squared Frobenius distance, averaged over pairs.
+        # ||A - B||_F^2 expansion: ||A||^2 + ||B||^2 - 2 <A, B>.
+        sq_norms = (delta ** 2).sum(dim=(1, 2))  # (C,)
+        inner = torch.einsum('coi,doi->cd', delta, delta)  # (C, C)
+        # pairwise: ||c-d||^2 = sq[c] + sq[d] - 2 inner[c,d]
+        pair_sum = 0.0
+        n_pairs = 0
+        for c in range(C):
+            for d in range(c + 1, C):
+                pair_sum = pair_sum + sq_norms[c] + sq_norms[d] - 2.0 * inner[c, d]
+                n_pairs += 1
+        if n_pairs == 0:
+            continue
+        total = total + (pair_sum / n_pairs)
+        n_layers += 1
+    if n_layers == 0:
+        return torch.zeros((), device=next(model.parameters()).device)
+    # MINUS sign: descending the loss MAXIMIZES distance.
+    return -(total / n_layers)
+
+
+def load_balance_loss(model):
+    """MoLE-style load-balance: penalize variance (across cohorts) of the
+    per-cohort delta Frobenius norms. If one cohort's delta is huge and another
+    is small, variance is high → loss is high → push toward equal-magnitude
+    cohorts.
+
+    Per layer: var_c(||ΔW_c||_F). Mean across layers.
+
+    Returns a non-negative scalar tensor.
+    """
+    total = 0.0
+    n_layers = 0
+    for mod in _iter_lora_cohort_modules(model):
+        U = mod.U
+        V = mod.V
+        C = U.shape[0]
+        if C < 2:
+            continue
+        # ||U_c V_c^T||_F^2 = trace(V_c U_c^T U_c V_c^T) = ||U_c^T U_c||_F-style;
+        # simpler: form ΔW_c then take Frobenius norm.
+        delta = torch.einsum('cor,cir->coi', U, V)
+        fro = torch.sqrt((delta ** 2).sum(dim=(1, 2)) + 1e-12)  # (C,)
+        total = total + fro.var(unbiased=False)
+        n_layers += 1
+    if n_layers == 0:
+        return torch.zeros((), device=next(model.parameters()).device)
+    return total / n_layers
+
+
+def set_hat_temperature(model, temp):
+    """Set FactorizedHypernet.temperature on every hypernet in the model.
+    Used to anneal the gate sharpness over training (HAT-style)."""
+    for mod in model.modules():
+        if isinstance(mod, FactorizedHypernet):
+            mod.temperature = float(temp)
+
+
+# ---------------------------------------------------------------------------
 # Training loop
 # ---------------------------------------------------------------------------
 def train_run(args):
@@ -160,6 +257,7 @@ def train_run(args):
         base_rank=args.base_rank,
         adaptive_capacity=args.adaptive_capacity,
         hybrid_lora_rank=args.hybrid_lora_rank,
+        rslora=args.rslora,
     )
 
     torch.manual_seed(args.seed)
@@ -251,17 +349,39 @@ def train_run(args):
     # not strictly needed for the hypernet here since the warmstart already
     # commits the embedding into a reasonable basin. Can be added later if drift
     # is a problem.
-    decay, nodecay = [], []
+    #
+    # Phase 2.1: SMEAR-style cap-LR multiplier. If --cap-lr-multiplier > 1, the
+    # cohort_log_caps / base_log_cap params go into a SEPARATE param group with
+    # an LR scaled by that multiplier, no weight decay. Otherwise the standard
+    # decay/nodecay split applies.
+    cap_lr_mult = float(args.cap_lr_multiplier)
+    use_cap_group = (cap_lr_mult != 1.0)
+    decay, nodecay, caps = [], [], []
+    n_cap = 0
     for n, p in model.named_parameters():
         if not p.requires_grad:
             continue
-        if p.dim() >= 2:
+        is_cap = use_cap_group and (n.endswith("cohort_log_caps") or n.endswith("base_log_cap"))
+        if is_cap:
+            caps.append(p)
+            n_cap += 1
+        elif p.dim() >= 2:
             decay.append(p)
         else:
             nodecay.append(p)
+    param_groups = [
+        {"params": decay, "weight_decay": args.weight_decay, "lr_mult": 1.0},
+        {"params": nodecay, "weight_decay": 0.0, "lr_mult": 1.0},
+    ]
+    if use_cap_group:
+        # Cap params: scaled LR, no weight decay (they're scalar log-magnitudes,
+        # not weight tensors). SMEAR-style separate router LR.
+        param_groups.append({"params": caps, "weight_decay": 0.0,
+                              "lr_mult": cap_lr_mult})
+        print(f"cap-lr-multiplier={cap_lr_mult}: {n_cap} cap params in their own group "
+              f"(lr × {cap_lr_mult}, weight_decay=0)")
     opt = torch.optim.AdamW(
-        [{"params": decay, "weight_decay": args.weight_decay},
-         {"params": nodecay, "weight_decay": 0.0}],
+        param_groups,
         lr=args.lr, betas=(0.9, args.beta2),
         fused=(device == "cuda"),
     )
@@ -278,7 +398,9 @@ def train_run(args):
     def apply_lr(it):
         lr = get_lr(it)
         for pg in opt.param_groups:
-            pg["lr"] = lr
+            # Phase 2.1: each group can carry an lr_mult (1.0 by default; cap
+            # params see cap_lr_mult * base lr).
+            pg["lr"] = lr * pg.get("lr_mult", 1.0)
         return lr
 
     amp_dtype = {"bfloat16": torch.bfloat16, "float16": torch.float16,
@@ -345,8 +467,26 @@ def train_run(args):
             sys.exit(f"--single-cohort {args.single_cohort} not in {cohort_names}")
         single_cohort_idx = cohort_names.index(args.single_cohort)
 
+    # ---- Phase 2.1: HAT temperature schedule (hypernet/hybrid only) ----
+    # Linear interpolation between hat_temp_start and hat_temp_end across all
+    # training iters. Default 1.0/1.0 is a no-op (skipped entirely below).
+    hat_anneal_active = (args.hat_temp_start != args.hat_temp_end)
+    if hat_anneal_active and args.variant not in ("hypernet", "hybrid"):
+        print(f"WARNING: --hat-temp-start/end set but variant is {args.variant!r} "
+              f"(no FactorizedHypernet to anneal); flags will be ignored.")
+        hat_anneal_active = False
+    if hat_anneal_active:
+        print(f"HAT temperature schedule: {args.hat_temp_start} → {args.hat_temp_end} "
+              f"linearly over {args.n_iters} iters")
+
     for it in range(args.n_iters):
         cur_lr = apply_lr(it)
+
+        # Phase 2.1: HAT temperature anneal (hypernet/hybrid only)
+        if hat_anneal_active:
+            t_frac = it / max(1, args.n_iters - 1)
+            temp = args.hat_temp_start + (args.hat_temp_end - args.hat_temp_start) * t_frac
+            set_hat_temperature(model, temp)
 
         # α sampling
         if single_cohort_idx is not None:
@@ -388,6 +528,16 @@ def train_run(args):
                               else layer.hypernet(model.cohort_embeddings)
                         L_anchor = L_anchor + F.mse_loss(cur, init_scales[li])
                     loss = loss + args.lambda_anchor * L_anchor
+                # Phase 2.1: cohort-contrast aux loss (Concept Sliders style).
+                # MAXIMIZES inter-cohort delta distance (loss is negative-distance).
+                if args.cohort_contrast_lambda > 0:
+                    L_contrast = cohort_contrast_loss(model)
+                    loss = loss + args.cohort_contrast_lambda * L_contrast
+                # Phase 2.1: MoLE-style load-balance aux loss.
+                # Penalizes variance in per-cohort delta magnitudes per layer.
+                if args.load_balance_lambda > 0:
+                    L_balance = load_balance_loss(model)
+                    loss = loss + args.load_balance_lambda * L_balance
 
         opt.zero_grad(set_to_none=True)
         loss.backward()
@@ -529,6 +679,30 @@ def main():
     p.add_argument("--freeze-caps", action="store_true",
                    help="(Phase 1.8) Freeze cohort_log_caps and base_log_cap params after "
                         "loading (or random init). They don't get gradient updates.")
+    # Phase 2.1: literature-driven interventions
+    p.add_argument("--cohort-contrast-lambda", type=float, default=0.0,
+                   help="(Phase 2.1, Concept Sliders) Coefficient on a cohort-discrimination "
+                        "loss. For LoRA: penalizes similarity between cohorts' delta matrices "
+                        "(U_c V_c.T). Pushes cohorts to learn distinct perturbations.")
+    p.add_argument("--rslora", action="store_true",
+                   help="(Phase 2.1, Kalajdzievski 2023) Use α/sqrt(r) scaling on LoRA deltas "
+                        "instead of α/r. Helps stability at high cohort rank.")
+    p.add_argument("--hat-temp-start", type=float, default=1.0,
+                   help="(Phase 2.1, HAT for hypernet/hybrid only) Starting gate-temperature "
+                        "at iter 0. Default 1.0 = no annealing. Set to 0.2 for soft gates "
+                        "(easier early training, less cohort differentiation).")
+    p.add_argument("--hat-temp-end", type=float, default=1.0,
+                   help="(Phase 2.1, HAT) Final gate-temperature. Set to 3.0 for hard gates "
+                        "at end (sharp cohort differentiation). Linearly ramps from start to "
+                        "end over total training.")
+    p.add_argument("--cap-lr-multiplier", type=float, default=1.0,
+                   help="(Phase 2.1, SMEAR) Multiplier on the LR for cohort_log_caps and "
+                        "base_log_cap params (requires --adaptive-capacity). Default 1.0; "
+                        "5.0 mimics SMEAR's separate router LR.")
+    p.add_argument("--load-balance-lambda", type=float, default=0.0,
+                   help="(Phase 2.1, MoLE) Coefficient on a load-balancing aux loss that "
+                        "penalizes variance in per-cohort delta magnitudes. Encourages "
+                        "uniform cohort utilization.")
     # Training
     p.add_argument("--n-iters", type=int, default=10000)
     p.add_argument("--lr", type=float, default=1e-3)

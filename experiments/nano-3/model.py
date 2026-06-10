@@ -60,6 +60,9 @@ class NanoGPTConfig:
     # deltas per cohort (separable, deletable, scalable per-cohort).
     # hybrid_lora_rank controls the LoRA delta rank (separate from hypernet rank).
     hybrid_lora_rank: int = 64
+    # Phase 2.1: rsLoRA scaling (Kalajdzievski 2023). If True, LoRA deltas are
+    # divided by sqrt(rank) for stable high-rank training.
+    rslora: bool = False
 
 
 # ---------------------------------------------------------------------------
@@ -80,7 +83,8 @@ def make_linear(cfg, in_features, out_features, gated):
         return LoRAAdditiveLinear(in_features, out_features, cfg.n_cohorts,
                                     rank=cfg.rank, bias=cfg.bias,
                                     base_rank=cfg.base_rank,
-                                    adaptive_capacity=cfg.adaptive_capacity)
+                                    adaptive_capacity=cfg.adaptive_capacity,
+                                    rslora=cfg.rslora)
     if cfg.variant == "hybrid":
         return HybridGatedLinear(in_features, out_features, cfg.n_cohorts,
                                    hypernet_d_embed=cfg.d_embed,
@@ -183,7 +187,13 @@ class PerWeightFFN(nn.Module):
 
 
 class FactorizedHypernet(nn.Module):
-    """g(e) = sigmoid(scale_bias + U(e) @ V(e)^T) * 2  bounded in [0, 2]."""
+    """g(e) = sigmoid(temperature * (scale_bias + U(e) @ V(e)^T)) * 2  bounded in [0, 2].
+
+    Phase 2.1: `self.temperature` is a non-parameter scalar set externally by the
+    training loop (HAT-style annealing). Default 1.0 reproduces the pre-2.1
+    behavior. Higher temperatures sharpen the sigmoid (gates pushed toward 0 or
+    2); lower temperatures soften it (gates closer to 1, less differentiation).
+    """
 
     def __init__(self, d_embed, out_features, in_features, rank):
         super().__init__()
@@ -195,6 +205,8 @@ class FactorizedHypernet(nn.Module):
         self.scale_bias = nn.Parameter(torch.zeros(out_features, in_features))
         nn.init.normal_(self.U.weight, std=0.01)
         nn.init.normal_(self.V.weight, std=0.01)
+        # HAT-style gate temperature; set per-step by the training loop.
+        self.temperature = 1.0
 
     def forward(self, e):
         if e.dim() == 1:
@@ -206,7 +218,7 @@ class FactorizedHypernet(nn.Module):
             U = self.U(e).view(B, self.out_features, self.rank)
             V = self.V(e).view(B, self.in_features, self.rank)
             raw = self.scale_bias.unsqueeze(0) + torch.bmm(U, V.transpose(1, 2))
-        return torch.sigmoid(raw) * 2.0
+        return torch.sigmoid(self.temperature * raw) * 2.0
 
 
 class HypernetGatedLinear(nn.Module):
@@ -324,12 +336,14 @@ class LoRAAdditiveLinear(nn.Module):
     """
 
     def __init__(self, in_features, out_features, n_cohorts, rank=16, bias=False,
-                  base_rank=-1, adaptive_capacity=False):
+                  base_rank=-1, adaptive_capacity=False, rslora=False):
         super().__init__()
         self.in_features = in_features
         self.out_features = out_features
         self.n_cohorts = n_cohorts
         self.rank = rank
+        # rsLoRA scaling: delta divided by sqrt(rank) for stability at high rank
+        self.rslora_scale = 1.0 / math.sqrt(rank) if rslora else 1.0
         # Cap base_rank at the natural rank limit; -1 = full rank
         if base_rank <= 0 or base_rank >= min(in_features, out_features):
             self.base_rank = -1
@@ -372,19 +386,29 @@ class LoRAAdditiveLinear(nn.Module):
             base_scale = torch.exp(self.base_log_cap)
             delta = torch.einsum('c,c,cor,cir->oi',
                                   alpha, cohort_caps, self.U, self.V)
+            delta = delta * self.rslora_scale
             return F.linear(x, base_scale * self._W_shared() + delta, self.bias)
         else:
             delta = torch.einsum('c,cor,cir->oi', alpha, self.U, self.V)
+            delta = delta * self.rslora_scale
             return F.linear(x, self._W_shared() + delta, self.bias)
 
 
 class LoRAAdditiveFFN(nn.Module):
     def __init__(self, cfg: NanoGPTConfig):
         super().__init__()
+        # NOTE: base_rank / adaptive_capacity intentionally NOT passed here —
+        # pre-Phase-2.1 behavior; existing trained variants depend on the FFN
+        # using full-rank, non-adaptive LoRA regardless of cfg.base_rank /
+        # cfg.adaptive_capacity. Don't touch without re-running everything.
+        # rslora IS passed because it's a Phase-2.1 addition with no existing
+        # trained variants to invalidate.
         self.c_fc = LoRAAdditiveLinear(cfg.n_embd, 4 * cfg.n_embd, cfg.n_cohorts,
-                                          rank=cfg.rank, bias=cfg.bias)
+                                          rank=cfg.rank, bias=cfg.bias,
+                                          rslora=cfg.rslora)
         self.c_proj = LoRAAdditiveLinear(4 * cfg.n_embd, cfg.n_embd, cfg.n_cohorts,
-                                            rank=cfg.rank, bias=cfg.bias)
+                                            rank=cfg.rank, bias=cfg.bias,
+                                            rslora=cfg.rslora)
         self.dropout = nn.Dropout(cfg.dropout)
 
     def forward(self, x, alpha, cohort_embeddings=None):
@@ -398,7 +422,8 @@ class LoRAAdditiveEmbedding(nn.Module):
     the init code in train.py walks all gated layers uniformly. (Though
     LoRA-additive doesn't actually need stratified init.)
     """
-    def __init__(self, vocab_size, n_embd, n_cohorts, rank=16, adaptive_capacity=False):
+    def __init__(self, vocab_size, n_embd, n_cohorts, rank=16, adaptive_capacity=False,
+                  rslora=False):
         super().__init__()
         self.vocab_size = vocab_size
         self.n_embd = n_embd
@@ -406,6 +431,8 @@ class LoRAAdditiveEmbedding(nn.Module):
         self.in_features = n_embd
         self.n_cohorts = n_cohorts
         self.rank = rank
+        # rsLoRA scaling: delta divided by sqrt(rank) for stability at high rank
+        self.rslora_scale = 1.0 / math.sqrt(rank) if rslora else 1.0
         self.weight = nn.Parameter(torch.empty(vocab_size, n_embd))
         nn.init.normal_(self.weight, mean=0.0, std=0.02)
         self.U = nn.Parameter(torch.empty(n_cohorts, vocab_size, rank))
@@ -422,10 +449,10 @@ class LoRAAdditiveEmbedding(nn.Module):
             base_scale = torch.exp(self.base_log_cap)
             delta = torch.einsum('c,c,cor,cir->oi',
                                   alpha, cohort_caps, self.U, self.V)
-            return base_scale * self.weight + delta
+            return base_scale * self.weight + delta * self.rslora_scale
         else:
             delta = torch.einsum('c,cor,cir->oi', alpha, self.U, self.V)
-            return self.weight + delta
+            return self.weight + delta * self.rslora_scale
 
     def embed(self, idx, alpha):
         return F.embedding(idx, self._W_eff(alpha))
@@ -598,7 +625,8 @@ class NanoGPT(nn.Module):
             elif cfg.variant == "lora":
                 self.gated_embed = LoRAAdditiveEmbedding(cfg.vocab_size, cfg.n_embd, cfg.n_cohorts,
                                                           rank=cfg.rank,
-                                                          adaptive_capacity=cfg.adaptive_capacity)
+                                                          adaptive_capacity=cfg.adaptive_capacity,
+                                                          rslora=cfg.rslora)
             elif cfg.variant == "hybrid":
                 self.gated_embed = HybridGatedEmbedding(cfg.vocab_size, cfg.n_embd, cfg.n_cohorts,
                                                           hypernet_d_embed=cfg.d_embed,

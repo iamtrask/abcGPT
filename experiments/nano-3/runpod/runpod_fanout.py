@@ -416,6 +416,58 @@ SWEEP_DEFAULT = [
      f"--variant hybrid {COMMON} --d-embed 8 --rank 16 --hybrid-lora-rank 64 "
      f"--init uniform --lambda-anchor 0.01 --warmstart-iters 100 "
      f"--gate-attention --gate-embedding"),
+
+    # ============================================================================
+    # PHASE 2.1: literature-driven interventions (sweep #14, 2026-06-10)
+    # Each intervention paired with the baseline it should improve. See
+    # LITERATURE_REVIEW_v2.md (HAT/HYWA/SMEAR) and LITERATURE_REVIEW.md (Concept
+    # Sliders / rsLoRA / MoLE).
+    # ============================================================================
+
+    # (1) Concept Sliders cohort-contrast loss on top of best small-rank LoRA.
+    # Pairs with: n3-lora-baseR8-r64-full.
+    # Hypothesis: pushing cohorts apart in delta-space directly should improve
+    # slider strength without rank inflation.
+    ("n3-lora-baseR8-r64-contrast",
+     f"--variant lora {COMMON} --rank 64 --base-rank 8 "
+     f"--cohort-contrast-lambda 0.001 "
+     f"--gate-attention --gate-embedding"),
+
+    # (2) rsLoRA (α/√r scaling) on top of the high-rank LoRA baseline.
+    # Pairs with: n3-lora-baseR8-r128-full.
+    # Hypothesis: at r=128 the standard 1/r scaling gives vanishingly small
+    # deltas at init; √r restores update magnitude → cohorts can specialize.
+    ("n3-lora-baseR8-r128-rslora",
+     f"--variant lora {COMMON} --rank 128 --base-rank 8 --rslora "
+     f"--gate-attention --gate-embedding"),
+
+    # (3) HAT gate-temperature annealing on hypernet (NOT LoRA).
+    # Pairs with: hypernet-singletons-full.
+    # Hypothesis: soft gates (T=0.2) early let the base learn shared structure;
+    # hard gates (T=3.0) late enforce cohort separation.
+    ("n3-hypernet-anneal",
+     f"--variant hypernet {COMMON} --d-embed 8 --rank 16 --init singletons "
+     f"--lambda-anchor 0.01 --warmstart-iters 1000 "
+     f"--hat-temp-start 0.2 --hat-temp-end 3.0 "
+     f"--gate-attention --gate-embedding"),
+
+    # (4) SMEAR-style higher LR for capacity (router) params.
+    # Pairs with: n3-lora-baseR8-r64-full-adaptive.
+    # Hypothesis: cap params need a faster LR than weight tensors so the
+    # allocation re-balances on a meaningful timescale.
+    ("n3-lora-baseR8-r64-adaptive-caplr5",
+     f"--variant lora {COMMON} --rank 64 --base-rank 8 --adaptive-capacity "
+     f"--cap-lr-multiplier 5.0 "
+     f"--gate-attention --gate-embedding"),
+
+    # (5) MoLE load-balance loss on top of the highest-rank LoRA baseline.
+    # Pairs with: n3-lora-baseR8-r256-full.
+    # Hypothesis: at r=256 some cohorts dominate the delta budget; balancing
+    # variance forces uniform per-cohort utilization.
+    ("n3-lora-baseR8-r256-balance",
+     f"--variant lora {COMMON} --rank 256 --base-rank 8 "
+     f"--load-balance-lambda 0.01 "
+     f"--gate-attention --gate-embedding"),
 ]
 
 
