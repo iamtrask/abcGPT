@@ -300,6 +300,31 @@ SWEEP_DEFAULT = [
 
     ("n3-lora-baseR2-r128-full",
      f"--variant lora {COMMON} --rank 128 --base-rank 2 --gate-attention --gate-embedding"),
+
+    # ============================================================================
+    # PHASE 1.5d: push cohort rank up at small base (sweep #10, 2026-06-10)
+    # Phase 1.5b showed contrast scales linearly with cohort rank (r=16 → +0.13,
+    # r=64 → +0.25 at baseR=8). Push r higher to test whether LoRA can match
+    # hypernet's +0.51 at acceptable diag.
+    # ============================================================================
+
+    ("n3-lora-baseR8-r128-full",
+     f"--variant lora {COMMON} --rank 128 --base-rank 8 --gate-attention --gate-embedding"),
+
+    ("n3-lora-baseR8-r256-full",
+     f"--variant lora {COMMON} --rank 256 --base-rank 8 --gate-attention --gate-embedding"),
+
+    ("n3-lora-baseR16-r128-full",
+     f"--variant lora {COMMON} --rank 128 --base-rank 16 --gate-attention --gate-embedding"),
+
+    ("n3-lora-baseR16-r256-full",
+     f"--variant lora {COMMON} --rank 256 --base-rank 16 --gate-attention --gate-embedding"),
+
+    ("n3-lora-baseR4-r256-full",
+     f"--variant lora {COMMON} --rank 256 --base-rank 4 --gate-attention --gate-embedding"),
+
+    ("n3-lora-baseR4-r512-full",
+     f"--variant lora {COMMON} --rank 512 --base-rank 4 --gate-attention --gate-embedding"),
 ]
 
 
