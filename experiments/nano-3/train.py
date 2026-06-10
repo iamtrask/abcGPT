@@ -171,6 +171,10 @@ def train_run(args):
           f"block={args.block_size}  |  {n_params/1e6:.2f}M params")
 
     # ---- Stratified init for gated variants ----
+    # LoRA-additive skips this entirely: LoRA-standard init (U random, V=0) at
+    # construction time already gives ΔW=0 → model behaves as ungated baseline
+    # → deltas grow during training. No warmstart needed, no anchor reg
+    # required by default.
     init_scales = None
     if args.variant in ("per_weight", "hypernet"):
         # For N > 16 cohorts (and the singletons init), short-circuit to
@@ -449,7 +453,7 @@ def train_run(args):
 # ---------------------------------------------------------------------------
 def main():
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    p.add_argument("--variant", required=True, choices=["ungated", "per_weight", "hypernet"])
+    p.add_argument("--variant", required=True, choices=["ungated", "per_weight", "hypernet", "lora"])
     p.add_argument("--variant-name", required=True)
     p.add_argument("--data-dir", default=str(REPO_ROOT / "data/shake_ts_code_char"))
     p.add_argument("--results-root", default=str(REPO_ROOT / "experiments/nano-3/results"))

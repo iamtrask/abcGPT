@@ -38,7 +38,7 @@ class NanoGPTConfig:
     dropout: float = 0.2
     bias: bool = False
     n_cohorts: int = 3
-    variant: str = "ungated"          # 'ungated' | 'per_weight' | 'hypernet'
+    variant: str = "ungated"          # 'ungated' | 'per_weight' | 'hypernet' | 'lora'
     d_embed: int = 8                  # cohort-embedding dim (hypernet)
     rank: int = 16                    # rank of the factorized hypernet
     cohort_names: List[str] = field(default_factory=lambda: ["shake", "ts", "code"])
@@ -61,6 +61,9 @@ def make_linear(cfg, in_features, out_features, gated):
     if cfg.variant == "hypernet":
         return HypernetGatedLinear(in_features, out_features, cfg.n_cohorts,
                                      cfg.d_embed, cfg.rank, bias=cfg.bias)
+    if cfg.variant == "lora":
+        return LoRAAdditiveLinear(in_features, out_features, cfg.n_cohorts,
+                                    rank=cfg.rank, bias=cfg.bias)
     raise ValueError(f"unknown variant: {cfg.variant}")
 
 
@@ -70,6 +73,8 @@ def _call_linear(layer, x, alpha, cohort_embeddings):
         return layer(x, alpha)
     if isinstance(layer, HypernetGatedLinear):
         return layer(x, alpha, cohort_embeddings)
+    if isinstance(layer, LoRAAdditiveLinear):
+        return layer(x, alpha)
     return layer(x)
 
 
@@ -274,6 +279,89 @@ class HypernetFFN(nn.Module):
 
 
 # ---------------------------------------------------------------------------
+# LoRA-Additive variant (Phase 1 of LORA_RESEARCH_PLAN.md)
+#
+# Mechanism per gated linear:
+#   W_eff = W_shared + Σ_c α_c · (U_c @ V_c^T)
+# Each cohort gets its own (U_c, V_c) low-rank factor pair. LoRA-standard
+# init (U ~ N(0, 0.02), V = 0) means ΔW = 0 at start → model behaves as
+# ungated baseline → deltas grow during training.
+#
+# No warmstart needed. No anchor reg required by default (LoRA-additive
+# has no uniformity-collapse failure mode).
+# ---------------------------------------------------------------------------
+class LoRAAdditiveLinear(nn.Module):
+    """W_eff = W + Σ_c α_c · (U_c @ V_c^T). Per-cohort low-rank deltas."""
+
+    def __init__(self, in_features, out_features, n_cohorts, rank=16, bias=False):
+        super().__init__()
+        self.in_features = in_features
+        self.out_features = out_features
+        self.n_cohorts = n_cohorts
+        self.rank = rank
+        # Shared base weight (same as nn.Linear)
+        self.weight = nn.Parameter(torch.empty(out_features, in_features))
+        nn.init.kaiming_uniform_(self.weight, a=math.sqrt(5))
+        self.bias = nn.Parameter(torch.zeros(out_features)) if bias else None
+        # Per-cohort low-rank factors
+        self.U = nn.Parameter(torch.empty(n_cohorts, out_features, rank))
+        self.V = nn.Parameter(torch.zeros(n_cohorts, in_features, rank))
+        # LoRA-standard init: U random small, V zero → ΔW = 0 at start
+        nn.init.normal_(self.U, std=0.02)
+
+    def forward(self, x, alpha):
+        # alpha: (n_cohorts,)
+        # delta: (out, in)
+        delta = torch.einsum('c,cor,cir->oi', alpha, self.U, self.V)
+        return F.linear(x, self.weight + delta, self.bias)
+
+
+class LoRAAdditiveFFN(nn.Module):
+    def __init__(self, cfg: NanoGPTConfig):
+        super().__init__()
+        self.c_fc = LoRAAdditiveLinear(cfg.n_embd, 4 * cfg.n_embd, cfg.n_cohorts,
+                                          rank=cfg.rank, bias=cfg.bias)
+        self.c_proj = LoRAAdditiveLinear(4 * cfg.n_embd, cfg.n_embd, cfg.n_cohorts,
+                                            rank=cfg.rank, bias=cfg.bias)
+        self.dropout = nn.Dropout(cfg.dropout)
+
+    def forward(self, x, alpha, cohort_embeddings=None):
+        return self.dropout(self.c_proj(F.gelu(self.c_fc(x, alpha)), alpha))
+
+
+class LoRAAdditiveEmbedding(nn.Module):
+    """LoRA-additive on the tied wte/lm_head matrix.
+
+    Same `out_features`/`in_features` aliases as the other gated embeddings so
+    the init code in train.py walks all gated layers uniformly. (Though
+    LoRA-additive doesn't actually need stratified init.)
+    """
+    def __init__(self, vocab_size, n_embd, n_cohorts, rank=16):
+        super().__init__()
+        self.vocab_size = vocab_size
+        self.n_embd = n_embd
+        self.out_features = vocab_size
+        self.in_features = n_embd
+        self.n_cohorts = n_cohorts
+        self.rank = rank
+        self.weight = nn.Parameter(torch.empty(vocab_size, n_embd))
+        nn.init.normal_(self.weight, mean=0.0, std=0.02)
+        self.U = nn.Parameter(torch.empty(n_cohorts, vocab_size, rank))
+        self.V = nn.Parameter(torch.zeros(n_cohorts, n_embd, rank))
+        nn.init.normal_(self.U, std=0.02)
+
+    def _W_eff(self, alpha):
+        delta = torch.einsum('c,cor,cir->oi', alpha, self.U, self.V)
+        return self.weight + delta
+
+    def embed(self, idx, alpha):
+        return F.embedding(idx, self._W_eff(alpha))
+
+    def project(self, x, alpha):
+        return F.linear(x, self._W_eff(alpha))
+
+
+# ---------------------------------------------------------------------------
 # Block + Model
 # ---------------------------------------------------------------------------
 class LayerNorm(nn.Module):
@@ -299,6 +387,8 @@ class Block(nn.Module):
             self.ffn = PerWeightFFN(cfg)
         elif cfg.variant == "hypernet":
             self.ffn = HypernetFFN(cfg)
+        elif cfg.variant == "lora":
+            self.ffn = LoRAAdditiveFFN(cfg)
         else:
             raise ValueError(f"unknown variant: {cfg.variant}")
 
@@ -308,6 +398,8 @@ class Block(nn.Module):
         if self.variant == "ungated":
             return x + self.ffn(h)
         elif self.variant == "per_weight":
+            return x + self.ffn(h, alpha)
+        elif self.variant == "lora":
             return x + self.ffn(h, alpha)
         else:  # hypernet
             return x + self.ffn(h, alpha, cohort_embeddings)
@@ -324,9 +416,14 @@ class NanoGPT(nn.Module):
         if self.gate_embedding:
             if cfg.variant == "per_weight":
                 self.gated_embed = PerWeightGatedEmbedding(cfg.vocab_size, cfg.n_embd, cfg.n_cohorts)
-            else:  # hypernet
+            elif cfg.variant == "hypernet":
                 self.gated_embed = HypernetGatedEmbedding(cfg.vocab_size, cfg.n_embd, cfg.n_cohorts,
                                                             cfg.d_embed, cfg.rank)
+            elif cfg.variant == "lora":
+                self.gated_embed = LoRAAdditiveEmbedding(cfg.vocab_size, cfg.n_embd, cfg.n_cohorts,
+                                                          rank=cfg.rank)
+            else:
+                raise ValueError(f"gate_embedding=True with unsupported variant {cfg.variant}")
             self.wte = None  # not used; gated_embed.embed/project replace it
             self.lm_head = None
         else:
@@ -362,9 +459,9 @@ class NanoGPT(nn.Module):
         if alpha is not None and not torch.is_tensor(alpha):
             alpha = torch.tensor(alpha, dtype=torch.float32, device=device)
         if self.gated_embed is not None:
-            if self.cfg.variant == "per_weight":
+            if self.cfg.variant in ("per_weight", "lora"):
                 tok = self.gated_embed.embed(idx, alpha)
-            else:
+            else:  # hypernet
                 tok = self.gated_embed.embed(idx, alpha, self.cohort_embeddings)
         else:
             tok = self.wte(idx)
@@ -373,9 +470,9 @@ class NanoGPT(nn.Module):
             x = block(x, alpha, self.cohort_embeddings)
         x = self.ln_f(x)
         if self.gated_embed is not None:
-            if self.cfg.variant == "per_weight":
+            if self.cfg.variant in ("per_weight", "lora"):
                 logits = self.gated_embed.project(x, alpha)
-            else:
+            else:  # hypernet
                 logits = self.gated_embed.project(x, alpha, self.cohort_embeddings)
         else:
             logits = self.lm_head(x)
@@ -394,11 +491,11 @@ class NanoGPT(nn.Module):
         # Attention layers (if gated)
         for block in self.blocks:
             for proj in (block.attn.c_attn, block.attn.c_proj):
-                if isinstance(proj, (PerWeightGatedLinear, HypernetGatedLinear)):
+                if isinstance(proj, (PerWeightGatedLinear, HypernetGatedLinear, LoRAAdditiveLinear)):
                     out.append(proj)
         # FFN layers
         for block in self.blocks:
-            if isinstance(block.ffn, (PerWeightFFN, HypernetFFN)):
+            if isinstance(block.ffn, (PerWeightFFN, HypernetFFN, LoRAAdditiveFFN)):
                 out.append(block.ffn.c_fc)
                 out.append(block.ffn.c_proj)
         # Embedding (if gated)

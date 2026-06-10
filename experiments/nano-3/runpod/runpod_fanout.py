@@ -219,6 +219,35 @@ SWEEP_DEFAULT = [
     ("n5-anchor0.5-singletons-full",
      f"--variant hypernet {COMMON} {N5_DATA} --d-embed 8 --rank 16 --init singletons "
      f"--lambda-anchor 0.5 --warmstart-iters 1000 --gate-attention --gate-embedding"),
+
+    # ============================================================================
+    # PHASE 1: LoRA-ADDITIVE vs HYPERNET (sweep #7, 2026-06-10)
+    # See LORA_RESEARCH_PLAN.md.
+    # Direct comparison to hypernet-singletons-full (N=3) and
+    # hypernet-low_hamming-full (N=5). LoRA-additive needs no warmstart and no
+    # anchor regularizer by default — LoRA-standard init (V=0) gives ΔW=0 at
+    # start; deltas learn from scratch.
+    # ============================================================================
+
+    # N=3, rank=16, full-gating (param-cheap rank-match to hypernet's r=16)
+    ("n3-lora-r16-full",
+     f"--variant lora {COMMON} --rank 16 --gate-attention --gate-embedding"),
+
+    # N=3, rank=64, full-gating (closer to hypernet's parameter count)
+    ("n3-lora-r64-full",
+     f"--variant lora {COMMON} --rank 64 --gate-attention --gate-embedding"),
+
+    # N=5, rank=16, full-gating (direct comparison to hypernet-low_hamming-full)
+    ("n5-lora-r16-full",
+     f"--variant lora {COMMON} {N5_DATA} --rank 16 --gate-attention --gate-embedding"),
+
+    # N=5, rank=32, full-gating (more delta capacity)
+    ("n5-lora-r32-full",
+     f"--variant lora {COMMON} {N5_DATA} --rank 32 --gate-attention --gate-embedding"),
+
+    # N=3, rank=16, FFN-only (tests whether LoRA needs full gating coverage)
+    ("n3-lora-r16-ffn-only",
+     f"--variant lora {COMMON} --rank 16"),
 ]
 
 
