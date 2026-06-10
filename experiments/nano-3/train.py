@@ -137,6 +137,8 @@ def train_run(args):
         n_cohorts=n_cohorts, variant=args.variant,
         d_embed=args.d_embed, rank=args.rank,
         cohort_names=cohort_names,
+        gate_attention=args.gate_attention,
+        gate_embedding=args.gate_embedding,
     )
 
     torch.manual_seed(args.seed)
@@ -454,6 +456,10 @@ def main():
     p.add_argument("--single-cohort", default="none",
                    help="If set to one of cohort_names (e.g. 'shake'), train ONLY on that cohort "
                         "for the full run. Used for per-cohort single-source ceiling baselines.")
+    p.add_argument("--gate-attention", action="store_true",
+                   help="Also gate the attention layer projections (c_attn for Q/K/V + c_proj).")
+    p.add_argument("--gate-embedding", action="store_true",
+                   help="Also gate the tied wte/lm_head embedding matrix.")
     p.add_argument("--seed", type=int, default=1337)
     p.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
     p.add_argument("--amp-dtype", default="bfloat16", choices=["bfloat16", "float16", "float32"])

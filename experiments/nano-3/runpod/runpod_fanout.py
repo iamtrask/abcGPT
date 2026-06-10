@@ -101,6 +101,35 @@ SWEEP_DEFAULT = [
     ("hypernet-singletons",
      f"--variant hypernet {COMMON} --d-embed 8 --rank 16 --init singletons "
      f"--lambda-anchor 0.01 --warmstart-iters 1000"),
+
+    # ------------------- FULL-GATING ABLATION (sweep #2, 2026-06-09 PM) -------------------
+    # Andrew's pushback: the first nano-3 sweep only gated the FFN. Cohorts differ
+    # MOST in attention patterns (Python indent/colon structure vs Shake speaker tags
+    # vs TS character-name repetition) AND in embedding-level token frequencies.
+    # Gate EVERYTHING (c_attn + attn.c_proj + wte/lm_head) and see whether the
+    # slider strength + matched-corner diag both improve.
+
+    ("hypernet-singletons-full",
+     f"--variant hypernet {COMMON} --d-embed 8 --rank 16 --init singletons "
+     f"--lambda-anchor 0.01 --warmstart-iters 1000 --gate-attention --gate-embedding"),
+
+    ("per_weight-singletons-full",
+     f"--variant per_weight {COMMON} --init singletons --lambda-anchor 0.01 "
+     f"--gate-attention --gate-embedding"),
+
+    # Uniform-init hypernet with full gating — does the weak slider get rescued
+    # by widening which layers gate? If yes, init-density matters less than
+    # gating coverage; if no, init-density is the dominant lever regardless.
+    ("hypernet-uniform-full",
+     f"--variant hypernet {COMMON} --d-embed 8 --rank 16 --init uniform "
+     f"--lambda-anchor 0.01 --warmstart-iters 1000 --gate-attention --gate-embedding"),
+
+    # Anchor=0 control: does full-gating help the slider survive without anchor?
+    # Previous noanchor (FFN only) collapsed to ungated. Maybe more gating = more
+    # robust to no anchor; or maybe anchor stays load-bearing regardless.
+    ("hypernet-singletons-full-noanchor",
+     f"--variant hypernet {COMMON} --d-embed 8 --rank 16 --init singletons "
+     f"--lambda-anchor 0.0 --warmstart-iters 1000 --gate-attention --gate-embedding"),
 ]
 
 

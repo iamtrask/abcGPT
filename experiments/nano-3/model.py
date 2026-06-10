@@ -42,26 +42,57 @@ class NanoGPTConfig:
     d_embed: int = 8                  # cohort-embedding dim (hypernet)
     rank: int = 16                    # rank of the factorized hypernet
     cohort_names: List[str] = field(default_factory=lambda: ["shake", "ts", "code"])
+    # "Gate everything" knobs — default False keeps prior nano-3 results valid
+    gate_attention: bool = False      # gate c_attn (Q/K/V) + attn.c_proj
+    gate_embedding: bool = False      # gate the tied wte/lm_head matrix
 
 
 # ---------------------------------------------------------------------------
-# Attention (shared across cohorts; α not consumed)
+# Linear factory: returns the right kind of (possibly-gated) Linear for cfg.variant
+# ---------------------------------------------------------------------------
+def make_linear(cfg, in_features, out_features, gated):
+    """Return Linear/PerWeightGatedLinear/HypernetGatedLinear depending on cfg.variant
+    AND whether this projection should be gated. Used to "wrap" attention/FFN/etc
+    projections so we can selectively enable gating on different parts of the model."""
+    if not gated or cfg.variant == "ungated":
+        return nn.Linear(in_features, out_features, bias=cfg.bias)
+    if cfg.variant == "per_weight":
+        return PerWeightGatedLinear(in_features, out_features, cfg.n_cohorts, bias=cfg.bias)
+    if cfg.variant == "hypernet":
+        return HypernetGatedLinear(in_features, out_features, cfg.n_cohorts,
+                                     cfg.d_embed, cfg.rank, bias=cfg.bias)
+    raise ValueError(f"unknown variant: {cfg.variant}")
+
+
+def _call_linear(layer, x, alpha, cohort_embeddings):
+    """Forward through layer regardless of whether it's plain Linear or a gated one."""
+    if isinstance(layer, PerWeightGatedLinear):
+        return layer(x, alpha)
+    if isinstance(layer, HypernetGatedLinear):
+        return layer(x, alpha, cohort_embeddings)
+    return layer(x)
+
+
+# ---------------------------------------------------------------------------
+# Attention (gated optionally on c_attn + c_proj)
 # ---------------------------------------------------------------------------
 class CausalSelfAttention(nn.Module):
     def __init__(self, cfg: NanoGPTConfig):
         super().__init__()
         assert cfg.n_embd % cfg.n_head == 0
-        self.c_attn = nn.Linear(cfg.n_embd, 3 * cfg.n_embd, bias=cfg.bias)
-        self.c_proj = nn.Linear(cfg.n_embd, cfg.n_embd, bias=cfg.bias)
+        self.cfg = cfg
+        self.c_attn = make_linear(cfg, cfg.n_embd, 3 * cfg.n_embd, gated=cfg.gate_attention)
+        self.c_proj = make_linear(cfg, cfg.n_embd, cfg.n_embd, gated=cfg.gate_attention)
         self.attn_dropout = nn.Dropout(cfg.dropout)
         self.resid_dropout = nn.Dropout(cfg.dropout)
         self.n_head = cfg.n_head
         self.n_embd = cfg.n_embd
         self.dropout = cfg.dropout
 
-    def forward(self, x):
+    def forward(self, x, alpha=None, cohort_embeddings=None):
         B, T, C = x.size()
-        q, k, v = self.c_attn(x).split(self.n_embd, dim=2)
+        qkv = _call_linear(self.c_attn, x, alpha, cohort_embeddings)
+        q, k, v = qkv.split(self.n_embd, dim=2)
         q = q.view(B, T, self.n_head, C // self.n_head).transpose(1, 2)
         k = k.view(B, T, self.n_head, C // self.n_head).transpose(1, 2)
         v = v.view(B, T, self.n_head, C // self.n_head).transpose(1, 2)
@@ -71,7 +102,7 @@ class CausalSelfAttention(nn.Module):
             is_causal=True,
         )
         y = y.transpose(1, 2).contiguous().view(B, T, C)
-        return self.resid_dropout(self.c_proj(y))
+        return self.resid_dropout(_call_linear(self.c_proj, y, alpha, cohort_embeddings))
 
 
 # ---------------------------------------------------------------------------
@@ -166,6 +197,68 @@ class HypernetGatedLinear(nn.Module):
         return F.linear(x, W_eff, self.bias)
 
 
+# ---------------------------------------------------------------------------
+# Gated embeddings (per_weight and hypernet variants) for wte/lm_head
+# ---------------------------------------------------------------------------
+class PerWeightGatedEmbedding(nn.Module):
+    """Gated embedding: weight is (vocab_size, n_embd); scales is (n_cohorts, vocab_size, n_embd).
+    Used for both wte (lookup) and lm_head (matmul) — tied via shared `weight`.
+
+    Exposes `out_features` (= vocab_size) and `in_features` (= n_embd) aliases so
+    the per-weight init + anchor regularizer code that walks `gated_layers()`
+    treats this layer uniformly with PerWeightGatedLinear.
+    """
+    def __init__(self, vocab_size, n_embd, n_cohorts):
+        super().__init__()
+        self.vocab_size = vocab_size
+        self.n_embd = n_embd
+        self.out_features = vocab_size
+        self.in_features = n_embd
+        self.n_cohorts = n_cohorts
+        self.weight = nn.Parameter(torch.empty(vocab_size, n_embd))
+        nn.init.normal_(self.weight, mean=0.0, std=0.02)
+        self.scales = nn.Parameter(torch.ones(n_cohorts, vocab_size, n_embd))
+
+    def _W_eff(self, alpha):
+        mix = (alpha.view(-1, 1, 1) * self.scales).sum(dim=0)
+        return self.weight * mix
+
+    def embed(self, idx, alpha):
+        return F.embedding(idx, self._W_eff(alpha))
+
+    def project(self, x, alpha):
+        return F.linear(x, self._W_eff(alpha))
+
+
+class HypernetGatedEmbedding(nn.Module):
+    """Hypernet-gated embedding: shared base weight + per-cohort multiplicative
+    modulation via a factorized hypernet of the cohort embeddings.
+
+    Same `out_features` / `in_features` aliases as PerWeightGatedEmbedding.
+    """
+    def __init__(self, vocab_size, n_embd, n_cohorts, d_embed, rank):
+        super().__init__()
+        self.vocab_size = vocab_size
+        self.n_embd = n_embd
+        self.out_features = vocab_size
+        self.in_features = n_embd
+        self.n_cohorts = n_cohorts
+        self.weight = nn.Parameter(torch.empty(vocab_size, n_embd))
+        nn.init.normal_(self.weight, mean=0.0, std=0.02)
+        self.hypernet = FactorizedHypernet(d_embed, vocab_size, n_embd, rank=rank)
+
+    def _W_eff(self, alpha, cohort_embeddings):
+        e_alpha = alpha @ cohort_embeddings
+        mix = self.hypernet(e_alpha)
+        return self.weight * mix
+
+    def embed(self, idx, alpha, cohort_embeddings):
+        return F.embedding(idx, self._W_eff(alpha, cohort_embeddings))
+
+    def project(self, x, alpha, cohort_embeddings):
+        return F.linear(x, self._W_eff(alpha, cohort_embeddings))
+
+
 class HypernetFFN(nn.Module):
     def __init__(self, cfg: NanoGPTConfig):
         super().__init__()
@@ -210,7 +303,7 @@ class Block(nn.Module):
             raise ValueError(f"unknown variant: {cfg.variant}")
 
     def forward(self, x, alpha=None, cohort_embeddings=None):
-        x = x + self.attn(self.ln1(x))
+        x = x + self.attn(self.ln1(x), alpha, cohort_embeddings)
         h = self.ln2(x)
         if self.variant == "ungated":
             return x + self.ffn(h)
@@ -224,13 +317,25 @@ class NanoGPT(nn.Module):
     def __init__(self, cfg: NanoGPTConfig):
         super().__init__()
         self.cfg = cfg
-        self.wte = nn.Embedding(cfg.vocab_size, cfg.n_embd)
         self.wpe = nn.Embedding(cfg.block_size, cfg.n_embd)
         self.drop = nn.Dropout(cfg.dropout)
+        # wte / lm_head: optionally gated (tied weight either way)
+        self.gate_embedding = cfg.gate_embedding and cfg.variant != "ungated"
+        if self.gate_embedding:
+            if cfg.variant == "per_weight":
+                self.gated_embed = PerWeightGatedEmbedding(cfg.vocab_size, cfg.n_embd, cfg.n_cohorts)
+            else:  # hypernet
+                self.gated_embed = HypernetGatedEmbedding(cfg.vocab_size, cfg.n_embd, cfg.n_cohorts,
+                                                            cfg.d_embed, cfg.rank)
+            self.wte = None  # not used; gated_embed.embed/project replace it
+            self.lm_head = None
+        else:
+            self.wte = nn.Embedding(cfg.vocab_size, cfg.n_embd)
+            self.lm_head = nn.Linear(cfg.n_embd, cfg.vocab_size, bias=False)
+            self.wte.weight = self.lm_head.weight  # tied
+            self.gated_embed = None
         self.blocks = nn.ModuleList([Block(cfg) for _ in range(cfg.n_layer)])
         self.ln_f = LayerNorm(cfg.n_embd, bias=cfg.bias)
-        self.lm_head = nn.Linear(cfg.n_embd, cfg.vocab_size, bias=False)
-        self.wte.weight = self.lm_head.weight  # tied
         if cfg.variant == "hypernet":
             self.cohort_embeddings = nn.Parameter(torch.randn(cfg.n_cohorts, cfg.d_embed) * 0.1)
         else:
@@ -254,13 +359,26 @@ class NanoGPT(nn.Module):
         device = idx.device
         b, t = idx.size()
         pos = torch.arange(0, t, dtype=torch.long, device=device)
-        x = self.drop(self.wte(idx) + self.wpe(pos))
         if alpha is not None and not torch.is_tensor(alpha):
             alpha = torch.tensor(alpha, dtype=torch.float32, device=device)
+        if self.gated_embed is not None:
+            if self.cfg.variant == "per_weight":
+                tok = self.gated_embed.embed(idx, alpha)
+            else:
+                tok = self.gated_embed.embed(idx, alpha, self.cohort_embeddings)
+        else:
+            tok = self.wte(idx)
+        x = self.drop(tok + self.wpe(pos))
         for block in self.blocks:
             x = block(x, alpha, self.cohort_embeddings)
         x = self.ln_f(x)
-        logits = self.lm_head(x)
+        if self.gated_embed is not None:
+            if self.cfg.variant == "per_weight":
+                logits = self.gated_embed.project(x, alpha)
+            else:
+                logits = self.gated_embed.project(x, alpha, self.cohort_embeddings)
+        else:
+            logits = self.lm_head(x)
         if targets is None:
             return logits, None
         loss = F.cross_entropy(
@@ -269,12 +387,23 @@ class NanoGPT(nn.Module):
         return logits, loss
 
     def gated_layers(self):
-        """Return list of (PerWeightGatedLinear | HypernetGatedLinear) for init/anchor."""
+        """Return list of all per-cohort-gated submodules (PerWeightGatedLinear /
+        HypernetGatedLinear / PerWeightGatedEmbedding / HypernetGatedEmbedding) — used
+        for stratified init + anchor regularization."""
         out = []
+        # Attention layers (if gated)
+        for block in self.blocks:
+            for proj in (block.attn.c_attn, block.attn.c_proj):
+                if isinstance(proj, (PerWeightGatedLinear, HypernetGatedLinear)):
+                    out.append(proj)
+        # FFN layers
         for block in self.blocks:
             if isinstance(block.ffn, (PerWeightFFN, HypernetFFN)):
                 out.append(block.ffn.c_fc)
                 out.append(block.ffn.c_proj)
+        # Embedding (if gated)
+        if self.gated_embed is not None:
+            out.append(self.gated_embed)
         return out
 
     def num_params(self, exclude_embedding=False):
