@@ -159,6 +159,7 @@ def train_run(args):
         gate_embedding=args.gate_embedding,
         base_rank=args.base_rank,
         adaptive_capacity=args.adaptive_capacity,
+        hybrid_lora_rank=args.hybrid_lora_rank,
     )
 
     torch.manual_seed(args.seed)
@@ -204,7 +205,7 @@ def train_run(args):
     # → deltas grow during training. No warmstart needed, no anchor reg
     # required by default.
     init_scales = None
-    if args.variant in ("per_weight", "hypernet"):
+    if args.variant in ("per_weight", "hypernet", "hybrid"):
         # For N > 16 cohorts (and the singletons init), short-circuit to
         # singleton-only sampling (avoids the 2^N pattern enumeration).
         # For N <= 16 with non-singletons init, enumerate normally.
@@ -232,7 +233,9 @@ def train_run(args):
                 stratified_init_per_weight(layer, probs, rng, singletons_only=singletons_only)
             init_scales = [layer.scales.detach().clone() for layer in model.gated_layers()]
         else:
-            # hypernet: warm-start each layer to fit a stratified-pattern target
+            # hypernet OR hybrid: warm-start the hypernet part of each layer
+            # to fit a stratified-pattern target (for hybrid, this initializes
+            # the multiplicative gate; the LoRA additive deltas start at zero)
             for li, layer in enumerate(model.gated_layers()):
                 target = stratified_pattern_target(layer.out_features, layer.in_features,
                                                        n_cohorts, probs, rng,
@@ -489,7 +492,11 @@ def train_run(args):
 # ---------------------------------------------------------------------------
 def main():
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    p.add_argument("--variant", required=True, choices=["ungated", "per_weight", "hypernet", "lora"])
+    p.add_argument("--variant", required=True,
+                   choices=["ungated", "per_weight", "hypernet", "lora", "hybrid"])
+    p.add_argument("--hybrid-lora-rank", type=int, default=64,
+                   help="(hybrid variant only) Rank of the LoRA cohort deltas added on "
+                        "top of the hypernet-gated base. Hypernet uses --rank as before.")
     p.add_argument("--variant-name", required=True)
     p.add_argument("--data-dir", default=str(REPO_ROOT / "data/shake_ts_code_char"))
     p.add_argument("--results-root", default=str(REPO_ROOT / "experiments/nano-3/results"))

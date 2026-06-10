@@ -384,6 +384,38 @@ SWEEP_DEFAULT = [
      f"--variant lora {COMMON} {N5_DATA} --rank 64 --base-rank 8 --adaptive-capacity --freeze-caps "
      f"--load-caps-from hf:iamtrask/abcGPT-nano-3:n5-lora-baseR8-r64-full-adaptive "
      f"--gate-attention --gate-embedding"),
+
+    # ============================================================================
+    # PHASE 2: HYBRID MECHANISM (sweep #13, 2026-06-10)
+    # Hypernet (multiplicative, shared-structure) on the base + LoRA (additive,
+    # per-cohort) on top. Hypothesis: combines parameter efficiency of hypernet
+    # with isolation of LoRA. Uses hypernet's best-known recipe (singletons +
+    # anchor reg) for the gating side; LoRA at modest rank for the per-cohort side.
+    # ============================================================================
+
+    # Hybrid with hypernet's known-good recipe + small LoRA add-on
+    ("n3-hybrid-d8-r16-lora32",
+     f"--variant hybrid {COMMON} --d-embed 8 --rank 16 --hybrid-lora-rank 32 "
+     f"--init singletons --lambda-anchor 0.01 --warmstart-iters 1000 "
+     f"--gate-attention --gate-embedding"),
+
+    # Hybrid with bigger LoRA component
+    ("n3-hybrid-d8-r16-lora64",
+     f"--variant hybrid {COMMON} --d-embed 8 --rank 16 --hybrid-lora-rank 64 "
+     f"--init singletons --lambda-anchor 0.01 --warmstart-iters 1000 "
+     f"--gate-attention --gate-embedding"),
+
+    # Hybrid with the N=5 recipe (low_hamming init)
+    ("n5-hybrid-d8-r16-lora32",
+     f"--variant hybrid {COMMON} {N5_DATA} --d-embed 8 --rank 16 --hybrid-lora-rank 32 "
+     f"--init low_hamming --lambda-anchor 0.01 --warmstart-iters 1000 "
+     f"--gate-attention --gate-embedding"),
+
+    # Hybrid without hypernet warmstart (random hypernet init) — test if LoRA carries the load
+    ("n3-hybrid-d8-r16-lora64-noinit",
+     f"--variant hybrid {COMMON} --d-embed 8 --rank 16 --hybrid-lora-rank 64 "
+     f"--init uniform --lambda-anchor 0.01 --warmstart-iters 100 "
+     f"--gate-attention --gate-embedding"),
 ]
 
 

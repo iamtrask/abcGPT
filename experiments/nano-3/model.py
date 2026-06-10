@@ -38,7 +38,7 @@ class NanoGPTConfig:
     dropout: float = 0.2
     bias: bool = False
     n_cohorts: int = 3
-    variant: str = "ungated"          # 'ungated' | 'per_weight' | 'hypernet' | 'lora'
+    variant: str = "ungated"          # 'ungated' | 'per_weight' | 'hypernet' | 'lora' | 'hybrid'
     d_embed: int = 8                  # cohort-embedding dim (hypernet)
     rank: int = 16                    # rank of the factorized hypernet
     cohort_names: List[str] = field(default_factory=lambda: ["shake", "ts", "code"])
@@ -54,6 +54,12 @@ class NanoGPTConfig:
     # normalized to fixed budget) and a base scaling factor. Lets the model
     # auto-allocate where capacity is needed.
     adaptive_capacity: bool = False
+    # Phase 2: Hybrid mechanism — hypernet base + LoRA cohort deltas
+    # The 'hybrid' variant uses hypernet for multiplicative gating on the
+    # shared base (parameter-efficient shared structure) PLUS additive LoRA
+    # deltas per cohort (separable, deletable, scalable per-cohort).
+    # hybrid_lora_rank controls the LoRA delta rank (separate from hypernet rank).
+    hybrid_lora_rank: int = 64
 
 
 # ---------------------------------------------------------------------------
@@ -75,6 +81,12 @@ def make_linear(cfg, in_features, out_features, gated):
                                     rank=cfg.rank, bias=cfg.bias,
                                     base_rank=cfg.base_rank,
                                     adaptive_capacity=cfg.adaptive_capacity)
+    if cfg.variant == "hybrid":
+        return HybridGatedLinear(in_features, out_features, cfg.n_cohorts,
+                                   hypernet_d_embed=cfg.d_embed,
+                                   hypernet_rank=cfg.rank,
+                                   lora_rank=cfg.hybrid_lora_rank,
+                                   bias=cfg.bias)
     raise ValueError(f"unknown variant: {cfg.variant}")
 
 
@@ -86,6 +98,8 @@ def _call_linear(layer, x, alpha, cohort_embeddings):
         return layer(x, alpha, cohort_embeddings)
     if isinstance(layer, LoRAAdditiveLinear):
         return layer(x, alpha)
+    if isinstance(layer, HybridGatedLinear):
+        return layer(x, alpha, cohort_embeddings)
     return layer(x)
 
 
@@ -421,6 +435,107 @@ class LoRAAdditiveEmbedding(nn.Module):
 
 
 # ---------------------------------------------------------------------------
+# Phase 2: Hybrid mechanism — hypernet base + LoRA cohort deltas
+#
+# Combines the two mechanisms where each is strongest:
+#   - Hypernet provides multiplicative gates on the shared base weight
+#     (parameter-efficient, shared structure across cohorts, captures
+#     "what varies in a structured way per cohort")
+#   - LoRA provides additive per-cohort deltas on top
+#     (per-cohort isolation, separability, smooth interpolation)
+#
+# Forward:
+#   gate = sigmoid(scale_bias + U_h(e_alpha) @ V_h(e_alpha)^T) * 2    # in [0, 2]
+#   delta = Σ_c alpha_c · (U_c @ V_c^T)
+#   W_eff = W_shared * gate + delta
+#
+# This is essentially the "structural layer = hypernet, individual layer =
+# LoRA" decomposition. Captures both shared inductive bias AND per-cohort
+# flexibility.
+# ---------------------------------------------------------------------------
+class HybridGatedLinear(nn.Module):
+    def __init__(self, in_features, out_features, n_cohorts,
+                  hypernet_d_embed=8, hypernet_rank=16, lora_rank=64, bias=False):
+        super().__init__()
+        self.in_features = in_features
+        self.out_features = out_features
+        self.n_cohorts = n_cohorts
+        # Shared base weight (will be modulated by hypernet gates)
+        self.weight = nn.Parameter(torch.empty(out_features, in_features))
+        nn.init.kaiming_uniform_(self.weight, a=math.sqrt(5))
+        self.bias = nn.Parameter(torch.zeros(out_features)) if bias else None
+        # Hypernet for multiplicative gating (sigmoid * 2 bounded)
+        self.hypernet = FactorizedHypernet(hypernet_d_embed, out_features, in_features,
+                                              rank=hypernet_rank)
+        # LoRA cohort deltas (additive on top of gated base)
+        self.U = nn.Parameter(torch.empty(n_cohorts, out_features, lora_rank))
+        self.V = nn.Parameter(torch.zeros(n_cohorts, in_features, lora_rank))
+        nn.init.normal_(self.U, std=0.02)
+
+    def forward(self, x, alpha, cohort_embeddings):
+        # Hypernet multiplicative gate (same math as HypernetGatedLinear)
+        e_alpha = alpha @ cohort_embeddings
+        gate = self.hypernet(e_alpha)
+        # LoRA additive delta
+        delta = torch.einsum('c,cor,cir->oi', alpha, self.U, self.V)
+        # Combined: gated base + LoRA delta
+        W_eff = self.weight * gate + delta
+        return F.linear(x, W_eff, self.bias)
+
+
+class HybridFFN(nn.Module):
+    def __init__(self, cfg: NanoGPTConfig):
+        super().__init__()
+        self.c_fc = HybridGatedLinear(cfg.n_embd, 4 * cfg.n_embd, cfg.n_cohorts,
+                                          hypernet_d_embed=cfg.d_embed,
+                                          hypernet_rank=cfg.rank,
+                                          lora_rank=cfg.hybrid_lora_rank,
+                                          bias=cfg.bias)
+        self.c_proj = HybridGatedLinear(4 * cfg.n_embd, cfg.n_embd, cfg.n_cohorts,
+                                            hypernet_d_embed=cfg.d_embed,
+                                            hypernet_rank=cfg.rank,
+                                            lora_rank=cfg.hybrid_lora_rank,
+                                            bias=cfg.bias)
+        self.dropout = nn.Dropout(cfg.dropout)
+
+    def forward(self, x, alpha, cohort_embeddings):
+        h = self.c_fc(x, alpha, cohort_embeddings)
+        return self.dropout(self.c_proj(F.gelu(h), alpha, cohort_embeddings))
+
+
+class HybridGatedEmbedding(nn.Module):
+    """Hybrid embedding for tied wte/lm_head: hypernet gate + LoRA delta on the
+    shared embedding matrix."""
+    def __init__(self, vocab_size, n_embd, n_cohorts, hypernet_d_embed=8,
+                  hypernet_rank=16, lora_rank=64):
+        super().__init__()
+        self.vocab_size = vocab_size
+        self.n_embd = n_embd
+        self.out_features = vocab_size
+        self.in_features = n_embd
+        self.n_cohorts = n_cohorts
+        self.weight = nn.Parameter(torch.empty(vocab_size, n_embd))
+        nn.init.normal_(self.weight, mean=0.0, std=0.02)
+        self.hypernet = FactorizedHypernet(hypernet_d_embed, vocab_size, n_embd,
+                                              rank=hypernet_rank)
+        self.U = nn.Parameter(torch.empty(n_cohorts, vocab_size, lora_rank))
+        self.V = nn.Parameter(torch.zeros(n_cohorts, n_embd, lora_rank))
+        nn.init.normal_(self.U, std=0.02)
+
+    def _W_eff(self, alpha, cohort_embeddings):
+        e_alpha = alpha @ cohort_embeddings
+        gate = self.hypernet(e_alpha)
+        delta = torch.einsum('c,cor,cir->oi', alpha, self.U, self.V)
+        return self.weight * gate + delta
+
+    def embed(self, idx, alpha, cohort_embeddings):
+        return F.embedding(idx, self._W_eff(alpha, cohort_embeddings))
+
+    def project(self, x, alpha, cohort_embeddings):
+        return F.linear(x, self._W_eff(alpha, cohort_embeddings))
+
+
+# ---------------------------------------------------------------------------
 # Block + Model
 # ---------------------------------------------------------------------------
 class LayerNorm(nn.Module):
@@ -448,6 +563,8 @@ class Block(nn.Module):
             self.ffn = HypernetFFN(cfg)
         elif cfg.variant == "lora":
             self.ffn = LoRAAdditiveFFN(cfg)
+        elif cfg.variant == "hybrid":
+            self.ffn = HybridFFN(cfg)
         else:
             raise ValueError(f"unknown variant: {cfg.variant}")
 
@@ -460,7 +577,7 @@ class Block(nn.Module):
             return x + self.ffn(h, alpha)
         elif self.variant == "lora":
             return x + self.ffn(h, alpha)
-        else:  # hypernet
+        else:  # hypernet OR hybrid
             return x + self.ffn(h, alpha, cohort_embeddings)
 
 
@@ -482,6 +599,11 @@ class NanoGPT(nn.Module):
                 self.gated_embed = LoRAAdditiveEmbedding(cfg.vocab_size, cfg.n_embd, cfg.n_cohorts,
                                                           rank=cfg.rank,
                                                           adaptive_capacity=cfg.adaptive_capacity)
+            elif cfg.variant == "hybrid":
+                self.gated_embed = HybridGatedEmbedding(cfg.vocab_size, cfg.n_embd, cfg.n_cohorts,
+                                                          hypernet_d_embed=cfg.d_embed,
+                                                          hypernet_rank=cfg.rank,
+                                                          lora_rank=cfg.hybrid_lora_rank)
             else:
                 raise ValueError(f"gate_embedding=True with unsupported variant {cfg.variant}")
             self.wte = None  # not used; gated_embed.embed/project replace it
@@ -493,7 +615,7 @@ class NanoGPT(nn.Module):
             self.gated_embed = None
         self.blocks = nn.ModuleList([Block(cfg) for _ in range(cfg.n_layer)])
         self.ln_f = LayerNorm(cfg.n_embd, bias=cfg.bias)
-        if cfg.variant == "hypernet":
+        if cfg.variant in ("hypernet", "hybrid"):
             self.cohort_embeddings = nn.Parameter(torch.randn(cfg.n_cohorts, cfg.d_embed) * 0.1)
         else:
             self.cohort_embeddings = None
@@ -521,7 +643,7 @@ class NanoGPT(nn.Module):
         if self.gated_embed is not None:
             if self.cfg.variant in ("per_weight", "lora"):
                 tok = self.gated_embed.embed(idx, alpha)
-            else:  # hypernet
+            else:  # hypernet OR hybrid
                 tok = self.gated_embed.embed(idx, alpha, self.cohort_embeddings)
         else:
             tok = self.wte(idx)
@@ -532,7 +654,7 @@ class NanoGPT(nn.Module):
         if self.gated_embed is not None:
             if self.cfg.variant in ("per_weight", "lora"):
                 logits = self.gated_embed.project(x, alpha)
-            else:  # hypernet
+            else:  # hypernet OR hybrid
                 logits = self.gated_embed.project(x, alpha, self.cohort_embeddings)
         else:
             logits = self.lm_head(x)
@@ -548,14 +670,17 @@ class NanoGPT(nn.Module):
         HypernetGatedLinear / PerWeightGatedEmbedding / HypernetGatedEmbedding) — used
         for stratified init + anchor regularization."""
         out = []
+        gated_linear_types = (PerWeightGatedLinear, HypernetGatedLinear,
+                               LoRAAdditiveLinear, HybridGatedLinear)
+        gated_ffn_types = (PerWeightFFN, HypernetFFN, LoRAAdditiveFFN, HybridFFN)
         # Attention layers (if gated)
         for block in self.blocks:
             for proj in (block.attn.c_attn, block.attn.c_proj):
-                if isinstance(proj, (PerWeightGatedLinear, HypernetGatedLinear, LoRAAdditiveLinear)):
+                if isinstance(proj, gated_linear_types):
                     out.append(proj)
         # FFN layers
         for block in self.blocks:
-            if isinstance(block.ffn, (PerWeightFFN, HypernetFFN, LoRAAdditiveFFN)):
+            if isinstance(block.ffn, gated_ffn_types):
                 out.append(block.ffn.c_fc)
                 out.append(block.ffn.c_proj)
         # Embedding (if gated)
