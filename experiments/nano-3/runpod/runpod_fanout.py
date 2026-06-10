@@ -357,6 +357,33 @@ SWEEP_DEFAULT = [
     ("n5-lora-baseR8-r64-full-adaptive",
      f"--variant lora {COMMON} {N5_DATA} --rank 64 --base-rank 8 --adaptive-capacity "
      f"--gate-attention --gate-embedding"),
+
+    # ============================================================================
+    # PHASE 1.8: 2-stage LoRA — load discovered caps from Phase 1.7 (sweep #12)
+    # Apples-to-apples vs hypernet's warmstart-then-train workflow.
+    # Stage 1: Phase 1.7 adaptive (already done)
+    # Stage 2 (this sweep): fresh training with discovered caps as frozen init
+    # ============================================================================
+
+    ("n3-lora-baseR8-r64-frozen-from-adaptive",
+     f"--variant lora {COMMON} --rank 64 --base-rank 8 --adaptive-capacity --freeze-caps "
+     f"--load-caps-from hf:iamtrask/abcGPT-nano-3:n3-lora-baseR8-r64-full-adaptive "
+     f"--gate-attention --gate-embedding"),
+
+    ("n3-lora-baseR16-r128-frozen-from-adaptive",
+     f"--variant lora {COMMON} --rank 128 --base-rank 16 --adaptive-capacity --freeze-caps "
+     f"--load-caps-from hf:iamtrask/abcGPT-nano-3:n3-lora-baseR16-r128-full-adaptive "
+     f"--gate-attention --gate-embedding"),
+
+    ("n3-lora-baseR8-r64-learnable-from-adaptive",
+     f"--variant lora {COMMON} --rank 64 --base-rank 8 --adaptive-capacity "
+     f"--load-caps-from hf:iamtrask/abcGPT-nano-3:n3-lora-baseR8-r64-full-adaptive "
+     f"--gate-attention --gate-embedding"),
+
+    ("n5-lora-baseR8-r64-frozen-from-adaptive",
+     f"--variant lora {COMMON} {N5_DATA} --rank 64 --base-rank 8 --adaptive-capacity --freeze-caps "
+     f"--load-caps-from hf:iamtrask/abcGPT-nano-3:n5-lora-baseR8-r64-full-adaptive "
+     f"--gate-attention --gate-embedding"),
 ]
 
 

@@ -172,6 +172,32 @@ def train_run(args):
     print(f"arch: n_layer={args.n_layer} n_head={args.n_head} n_embd={args.n_embd} "
           f"block={args.block_size}  |  {n_params/1e6:.2f}M params")
 
+    # Phase 1.8: load previously-discovered capacity allocations from a Stage-1 ckpt
+    if args.load_caps_from:
+        assert args.adaptive_capacity, "--load-caps-from requires --adaptive-capacity"
+        load_path = args.load_caps_from
+        if load_path.startswith("hf:"):
+            # Format "hf:<repo>:<variant>" e.g. "hf:iamtrask/abcGPT-nano-3:n3-lora-baseR8-r64-full-adaptive"
+            _, repo, variant = load_path.split(":", 2)
+            from huggingface_hub import hf_hub_download
+            print(f"fetching {variant}/model.pt from HF repo {repo}")
+            load_path = hf_hub_download(repo_id=repo, filename=f"{variant}/model.pt",
+                                          repo_type="model")
+        print(f"loading caps from: {load_path}")
+        prev_state = torch.load(load_path, map_location=device, weights_only=True)
+        n_loaded = 0
+        for name, p in model.named_parameters():
+            if name.endswith("cohort_log_caps") or name.endswith("base_log_cap"):
+                if name in prev_state:
+                    p.data.copy_(prev_state[name])
+                    n_loaded += 1
+        print(f"  loaded {n_loaded} cap parameters from prior run")
+        if args.freeze_caps:
+            for name, p in model.named_parameters():
+                if name.endswith("cohort_log_caps") or name.endswith("base_log_cap"):
+                    p.requires_grad = False
+            print(f"  caps frozen (requires_grad=False)")
+
     # ---- Stratified init for gated variants ----
     # LoRA-additive skips this entirely: LoRA-standard init (U random, V=0) at
     # construction time already gives ΔW=0 → model behaves as ungated baseline
@@ -488,6 +514,14 @@ def main():
                    help="(Phase 1.7) Probability of sampling alpha as 0.5/0.5 mix of two "
                         "random cohorts during the Dirichlet phase. Directly trains midpoint "
                         "behavior. 0 = standard Dirichlet; 0.2 recommended for adaptive runs.")
+    p.add_argument("--load-caps-from", default="",
+                   help="(Phase 1.8) Path to a previous run's model.pt. Loads ONLY the "
+                        "cohort_log_caps and base_log_cap params from each gated layer, "
+                        "ignores everything else. Lets us start fresh training with "
+                        "previously-discovered allocation as init. Requires --adaptive-capacity.")
+    p.add_argument("--freeze-caps", action="store_true",
+                   help="(Phase 1.8) Freeze cohort_log_caps and base_log_cap params after "
+                        "loading (or random init). They don't get gradient updates.")
     # Training
     p.add_argument("--n-iters", type=int, default=10000)
     p.add_argument("--lr", type=float, default=1e-3)
