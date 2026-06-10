@@ -173,10 +173,13 @@ def train_run(args):
     # ---- Stratified init for gated variants ----
     init_scales = None
     if args.variant in ("per_weight", "hypernet"):
-        # For N > 16 cohorts, only the "singletons" init is feasible (the 2^N
-        # pattern enumeration blows up). singletons_only=True takes a
-        # direct-singleton-sampling path that doesn't enumerate patterns.
-        singletons_only = (n_cohorts > 16) or (args.init == "singletons")
+        # For N > 16 cohorts (and the singletons init), short-circuit to
+        # singleton-only sampling (avoids the 2^N pattern enumeration).
+        # For N <= 16 with non-singletons init, enumerate normally.
+        singletons_only = (n_cohorts > 16) or (args.init == "singletons" and n_cohorts > 16)
+        if args.init == "singletons":
+            # singletons init at low N is just the direct singleton path too
+            singletons_only = True
         if singletons_only:
             probs = None
             print(f"stratified init: singletons-only (N={n_cohorts}; each weight → exactly one cohort)")

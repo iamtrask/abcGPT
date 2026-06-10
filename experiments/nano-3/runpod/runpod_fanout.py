@@ -182,6 +182,43 @@ SWEEP_DEFAULT = [
      f"--variant hypernet {COMMON} --data-dir data/100_sources_char "
      f"--d-embed 8 --rank 16 --init singletons --lambda-anchor 0.01 "
      f"--warmstart-iters 200 --gate-attention --gate-embedding"),
+
+    # ============================================================================
+    # N=5 DIAGNOSTIC SWEEP (sweep #6, 2026-06-10): N=5 default-recipe broke
+    # (-0.21 contrast sum, 2 of 5 cohorts inverted). Six variants test 4
+    # hypotheses for what's broken.
+    # ============================================================================
+
+    # Hypothesis A (Andrew's): too much non-slider capacity. Shrink model.
+    ("n5-4L-256d-singletons-full",
+     f"--variant hypernet {COMMON} {N5_DATA} --d-embed 8 --rank 16 --init singletons "
+     f"--lambda-anchor 0.01 --warmstart-iters 1000 --gate-attention --gate-embedding "
+     f"--n-layer 4 --n-head 4 --n-embd 256"),
+
+    ("n5-4L-192d-singletons-full",
+     f"--variant hypernet {COMMON} {N5_DATA} --d-embed 8 --rank 16 --init singletons "
+     f"--lambda-anchor 0.01 --warmstart-iters 1000 --gate-attention --gate-embedding "
+     f"--n-layer 4 --n-head 4 --n-embd 192"),
+
+    ("n5-2L-192d-singletons-full",
+     f"--variant hypernet {COMMON} {N5_DATA} --d-embed 8 --rank 16 --init singletons "
+     f"--lambda-anchor 0.01 --warmstart-iters 1000 --gate-attention --gate-embedding "
+     f"--n-layer 2 --n-head 4 --n-embd 192"),
+
+    # Hypothesis B: hypernet expressive capacity too small for 5 cohort identities.
+    ("n5-d16-r32-singletons-full",
+     f"--variant hypernet {COMMON} {N5_DATA} --d-embed 16 --rank 32 --init singletons "
+     f"--lambda-anchor 0.01 --warmstart-iters 1000 --gate-attention --gate-embedding"),
+
+    # Hypothesis C: singletons init too sparse at N=5 (only 1/5 of weights per cohort).
+    ("n5-low_hamming-full",
+     f"--variant hypernet {COMMON} {N5_DATA} --d-embed 8 --rank 16 --init low_hamming "
+     f"--lambda-anchor 0.01 --warmstart-iters 1000 --gate-attention --gate-embedding"),
+
+    # Hypothesis D: anchor reg too weak; scales drift toward uniformity.
+    ("n5-anchor0.5-singletons-full",
+     f"--variant hypernet {COMMON} {N5_DATA} --d-embed 8 --rank 16 --init singletons "
+     f"--lambda-anchor 0.5 --warmstart-iters 1000 --gate-attention --gate-embedding"),
 ]
 
 
