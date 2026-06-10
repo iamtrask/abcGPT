@@ -73,10 +73,26 @@ def make_batch_fn(arr, block_size, batch_size, device):
 # ---------------------------------------------------------------------------
 # Stratified init
 # ---------------------------------------------------------------------------
-def stratified_pattern_target(out_features, in_features, n_cohorts, probs, rng):
+def stratified_pattern_target(out_features, in_features, n_cohorts, probs, rng,
+                                  singletons_only=False):
     """Sample a (n_cohorts, out, in) target where each weight is randomly assigned
-    a non-empty bit-pattern from `probs` (over the 2^N - 1 non-empty patterns)."""
+    a non-empty bit-pattern.
+
+    For small N (≤ 16): enumerate all 2^N - 1 non-empty patterns and sample from
+    `probs` (a distribution over those patterns).
+
+    For large N (or `singletons_only=True`): short-circuit to singletons only —
+    each weight is assigned to EXACTLY ONE cohort sampled uniformly. Avoids the
+    2^N pattern enumeration that's infeasible past N≈20.
+    """
     n_weights = out_features * in_features
+    if singletons_only or n_cohorts > 16:
+        # Singletons-only path: sample one cohort per weight, build sparse pattern.
+        sampled = rng.integers(0, n_cohorts, size=n_weights)        # (n_weights,)
+        scale = np.zeros((n_cohorts, n_weights), dtype=np.float32)
+        scale[sampled, np.arange(n_weights)] = 1.0
+        scale = scale.reshape(n_cohorts, out_features, in_features)
+        return torch.from_numpy(scale)
     n_patterns = 2 ** n_cohorts - 1
     patterns = np.array(
         [[int(b) for b in bin(i)[2:].zfill(n_cohorts)] for i in range(1, n_patterns + 1)],
@@ -88,9 +104,11 @@ def stratified_pattern_target(out_features, in_features, n_cohorts, probs, rng):
     return torch.from_numpy(scale)
 
 
-def stratified_init_per_weight(layer: PerWeightGatedLinear, probs, rng):
+def stratified_init_per_weight(layer: PerWeightGatedLinear, probs, rng,
+                                  singletons_only=False):
     target = stratified_pattern_target(layer.out_features, layer.in_features,
-                                          layer.n_cohorts, probs, rng)
+                                          layer.n_cohorts, probs, rng,
+                                          singletons_only=singletons_only)
     layer.scales.data.copy_(target.to(layer.scales.device))
 
 
@@ -155,29 +173,35 @@ def train_run(args):
     # ---- Stratified init for gated variants ----
     init_scales = None
     if args.variant in ("per_weight", "hypernet"):
-        n_patterns = 2 ** n_cohorts - 1
-        patterns = [tuple(int(b) for b in bin(i)[2:].zfill(n_cohorts))
-                    for i in range(1, n_patterns + 1)]
-        if args.init == "uniform":
-            probs = np.ones(n_patterns) / n_patterns
-        elif args.init == "low_hamming":
-            w = np.array([1.0 / sum(p) for p in patterns], dtype=float)
-            probs = w / w.sum()
-        elif args.init == "singletons":
-            w = np.array([1.0 if sum(p) == 1 else 0.0 for p in patterns], dtype=float)
-            probs = w / w.sum()
+        # For N > 16 cohorts, only the "singletons" init is feasible (the 2^N
+        # pattern enumeration blows up). singletons_only=True takes a
+        # direct-singleton-sampling path that doesn't enumerate patterns.
+        singletons_only = (n_cohorts > 16) or (args.init == "singletons")
+        if singletons_only:
+            probs = None
+            print(f"stratified init: singletons-only (N={n_cohorts}; each weight → exactly one cohort)")
         else:
-            raise ValueError(f"unknown --init: {args.init}")
-        print(f"stratified init probs ({n_patterns} patterns): {probs.round(3).tolist()}")
+            n_patterns = 2 ** n_cohorts - 1
+            patterns = [tuple(int(b) for b in bin(i)[2:].zfill(n_cohorts))
+                        for i in range(1, n_patterns + 1)]
+            if args.init == "uniform":
+                probs = np.ones(n_patterns) / n_patterns
+            elif args.init == "low_hamming":
+                w = np.array([1.0 / sum(p) for p in patterns], dtype=float)
+                probs = w / w.sum()
+            else:
+                raise ValueError(f"unknown --init: {args.init}")
+            print(f"stratified init probs ({n_patterns} patterns): {probs.round(3).tolist()}")
         if args.variant == "per_weight":
             for layer in model.gated_layers():
-                stratified_init_per_weight(layer, probs, rng)
+                stratified_init_per_weight(layer, probs, rng, singletons_only=singletons_only)
             init_scales = [layer.scales.detach().clone() for layer in model.gated_layers()]
         else:
             # hypernet: warm-start each layer to fit a stratified-pattern target
             for li, layer in enumerate(model.gated_layers()):
                 target = stratified_pattern_target(layer.out_features, layer.in_features,
-                                                       n_cohorts, probs, rng)
+                                                       n_cohorts, probs, rng,
+                                                       singletons_only=singletons_only)
                 fl = warmstart_hypernet_layer(model, layer, target, n_iters=args.warmstart_iters)
                 print(f"  warmstart layer {li}: final MSE = {fl:.4f}")
             with torch.no_grad():

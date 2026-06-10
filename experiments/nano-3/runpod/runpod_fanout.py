@@ -169,6 +169,19 @@ SWEEP_DEFAULT = [
     ("n5-per_weight-singletons-full",
      f"--variant per_weight {COMMON} {N5_DATA} --init singletons --lambda-anchor 0.01 "
      f"--gate-attention --gate-embedding"),
+
+    # ============================================================================
+    # N=100 COHORT SWEEP (sweep #5, 2026-06-10): just-for-kicks scaling test.
+    # 100 distinct gutenberg-style classic novels, each as its own cohort.
+    # Singletons-init (the only feasible init at N=100 — uniform would need
+    # 2^100 patterns). on_box.sh fetches the pre-built bins tarball from HF
+    # since the 107MB of source .txt files isn't committed to git.
+    # ============================================================================
+
+    ("n100-hypernet-singletons-full",
+     f"--variant hypernet {COMMON} --data-dir data/100_sources_char "
+     f"--d-embed 8 --rank 16 --init singletons --lambda-anchor 0.01 "
+     f"--warmstart-iters 200 --gate-attention --gate-embedding"),
 ]
 
 

@@ -54,11 +54,21 @@ echo "--- python deps ---"
 pip install -q --upgrade pip
 pip install -q numpy "huggingface_hub>=0.24"
 
-# 4. Prepare data — prepare.py self-downloads shake / TinyStories / cpython sources
-echo "--- prepare shake+ts+code data ---"
+# 4. Prepare data — auto-detect which dataset this variant needs from TRAIN_ARGS
+echo "--- prepare data ---"
 cd "$REPO_DIR"
-if [[ ! -f data/shake_ts_code_char/meta.pkl ]]; then
-  python3 data/shake_ts_code_char/prepare.py
+# Default to shake_ts_code_char unless --data-dir is in TRAIN_ARGS
+DATA_DIR="data/shake_ts_code_char"
+if [[ "$TRAIN_ARGS" == *"--data-dir"* ]]; then
+  DATA_DIR=$(echo "$TRAIN_ARGS" | sed -n 's/.*--data-dir \([^ ]*\).*/\1/p')
+fi
+echo "  data dir: $DATA_DIR"
+if [[ ! -f "$DATA_DIR/meta.pkl" ]]; then
+  if [[ -f "$DATA_DIR/prepare.py" ]]; then
+    python3 "$DATA_DIR/prepare.py"
+  else
+    echo "  ERROR: no prepare.py at $DATA_DIR"; exit 1
+  fi
 else
   echo "  bins already present, skipping prep"
 fi
