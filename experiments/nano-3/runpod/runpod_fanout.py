@@ -522,6 +522,52 @@ SWEEP_DEFAULT = [
      f"--hybrid-lora-rank 32 --init singletons --lambda-anchor 0.01 "
      f"--warmstart-iters 1000 --bias-anchor "
      f"--gate-attention --gate-embedding"),
+
+    # ============================================================================
+    # PHASE 4: SCALE-UP + EQUAL-LOSS sweep
+    #
+    # Andrew's hypothesis: equal val_losses across cohorts → no easy attractor →
+    # cleaner slider. Evidence: `n3-lora-baseR2-r128-full-adaptive` IS the only
+    # variant with near-equal per-cohort diag (spread 0.026 nats!) AND has
+    # contrast +0.537. But its absolute diag is 7.11 — terrible quality.
+    #
+    # Structural finding (qualitative agent, 2026-06-10):
+    # `ungated-10k` has LOST shake capability — outputs TinyStories on Shakespeare
+    # prompts even though `ungated-shake-only` emits real Folger-style text. The
+    # shared backbone at 6L-384d for 10k iters cannot retain Shakespeare against
+    # the TinyStories attractor. ALL existing sliders also fail to recover shake
+    # (cover ≤ 3/10). The fix needs more shared-backbone capacity (bigger model)
+    # AND/OR more iters AND/OR explicit loss balance.
+    #
+    # Three tests at 8L-512d (~2× params over baseline):
+    #   1. n3-lora-8L-512d-baseR2-r128-adaptive: scale up the proven-equal-loss
+    #      recipe. Should equalize losses, hopefully WITHOUT the 7.11 diag.
+    #   2. n3-lora-8L-512d-baseR8-r64-warmstart: bigger model, baseR=8, load+freeze
+    #      caps from baseR=2-adaptive (2-stage workflow: discover balance small,
+    #      train quality big).
+    #   3. n3-lora-8L-512d-baseR8-r64-adaptive-caplr20: bigger model + cap_lr 20×.
+    #      Tests whether ULTRA-aggressive cap LR finally moves the equilibrium at
+    #      baseR=8.
+    # ============================================================================
+
+    ("n3-lora-8L-512d-baseR2-r128-adaptive",
+     f"--variant lora {COMMON} --rank 128 --base-rank 2 --adaptive-capacity "
+     f"--gate-attention --gate-embedding "
+     f"--n-layer 8 --n-head 8 --n-embd 512"),
+
+    ("n3-lora-8L-512d-baseR8-r64-warmstart-20k",
+     f"--variant lora {COMMON.replace('--n-iters 10000', '--n-iters 20000')} "
+     f"--rank 64 --base-rank 8 --adaptive-capacity "
+     f"--gate-attention --gate-embedding "
+     f"--n-layer 8 --n-head 8 --n-embd 512 "
+     f"--load-caps-from hf:iamtrask/abcGPT-nano-3:n3-lora-baseR2-r128-full-adaptive "
+     f"--freeze-caps"),
+
+    ("n3-lora-8L-512d-baseR8-r64-adaptive-caplr20",
+     f"--variant lora {COMMON} --rank 64 --base-rank 8 --adaptive-capacity "
+     f"--cap-lr-multiplier 20.0 "
+     f"--gate-attention --gate-embedding "
+     f"--n-layer 8 --n-head 8 --n-embd 512"),
 ]
 
 
