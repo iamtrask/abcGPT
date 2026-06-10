@@ -9,6 +9,48 @@ phase if the previous one validates. Total compute budget envelope for
 research phases (1-6): **~$160 + ~6 weeks**. Phases 7-8 are infrastructure
 deployment and order(months, $10K+).
 
+See `LITERATURE_REVIEW.md` (sibling file) for the full prior-work scan.
+
+---
+
+## Prior work + positioning (added 2026-06-10)
+
+15-min research scan found **no prior work matches the full mechanism**.
+Closest analogues:
+- **Concept Sliders** (Gandikota ECCV 2024) — continuous α slider but binary
+  axis, post-hoc, diffusion-only
+- **Rewarded Soups** (Rame NeurIPS 2023) — continuous α between full models,
+  post-hoc, no LoRA
+- **MoLE / Mixture of LoRA Experts** (Wu ICLR 2024) — per-layer learned α
+  over N independent LoRAs (closest computational structure)
+- **AdaMix** (Wang EMNLP 2022) — stochastic-routing-during-training-then-
+  average (closest curriculum precedent)
+
+### What is novel here
+
+1. Joint pretraining of `W_shared + N` cohort LoRAs **from scratch** (everyone
+   else freezes a pretrained base)
+2. **One-hot → Dirichlet α curriculum** (not seen in literature)
+3. **Deliberately low-rank base** to force capacity into cohort deltas (Phase 1.5)
+   — genuinely unexplored intersection
+4. Per-step α-routing during CoT (Phase 5)
+
+### Critical prior-work findings that change our plan
+
+- **MoLE observes gating collapse at N>8 without regularization.** Our N=5
+  failure with default hyperparams may be hitting the same regime. Adds
+  urgency to Phase 1.5 + Phase 1.6 (per-layer α).
+- **TIES/DARE exist because independent-trained LoRA deltas interfere.** Our
+  joint training should largely sidestep this BUT we must baseline against
+  TIES-post-merge of our jointly-trained LoRAs. If TIES adds zero, our
+  curriculum IS doing real work. If TIES helps, our curriculum isn't
+  preventing interference and we should fix it.
+- **Concept Sliders' contrastive objective** (enforce α=+1 vs α=−1 behaviors
+  during training) translates to our one-hot phase as a matched-vs-opposite
+  α contrastive loss. Should test (Phase 1.7).
+- **rsLoRA / DoRA / proper α/r scaling** — library-level upgrades, 1-2 pt
+  gains each. Easy adoption, postpone to after architecture is settled.
+
 ---
 
 ## Mechanism summary
@@ -92,9 +134,111 @@ gates may be slightly more expressive than rank-limited linear deltas).
 
 ---
 
+## Phase 1.5 — Capacity asymmetry: low-rank base (running 2026-06-10, ~$0.50)
+
+**Triggered by Phase 1 result**: LoRA-additive at full base rank produced
+contrast +0.03 at N=3 (vs hypernet's +0.51). Symptom: bigger cohort rank
+(r=64) didn't help and slightly hurt contrast (+0.01), confirming the base
+absorbs cohort-distinct behavior.
+
+**Goal**: force more capacity into per-cohort deltas by limiting the shared
+base's rank.
+
+### Implementation
+
+`base_rank` config field on `LoRAAdditiveLinear`: when > 0, replace
+full-rank `weight` (out × in) with low-rank factorization `base_A @ base_B.T`
+where base_A, base_B are skinny rank-base_rank matrices.
+
+### Sweep (4 variants, ~$0.36)
+
+- `n3-lora-baseR256-r16-full` (modest reduction from natural rank 384)
+- `n3-lora-baseR128-r16-full` (half capacity)
+- `n3-lora-baseR64-r16-full` (quarter capacity, likely too small)
+- `n3-lora-baseR128-r32-full` (low base + bigger cohort rank)
+
+### Decision gate
+
+Contrast climbs monotonically as base_rank shrinks (until base becomes
+insufficient for language fundamentals → diag explodes). If yes: low-rank
+base is the recipe lever for all downstream phases. If no: Phase 1.6
+(per-layer α) is next.
+
+---
+
+## Phase 1.6 — Per-layer α (conditional, ~$0.40)
+
+**Triggered if Phase 1.5 doesn't fully recover contrast.**
+
+Based on MoLE finding that per-layer α beats global α by 3-5 pts on V&L
+benchmarks. Our current implementation uses ONE global α across all gated
+layers — could be the contrast bottleneck.
+
+### Implementation candidates
+
+1. **Simplest**: independent learnable α_layer = MLP(α_global) for each layer.
+   The user still controls a global α; per-layer transforms differentiate
+   how each layer interprets it.
+2. **Median complexity**: per-layer routing module that conditions α on the
+   layer's hidden state.
+3. **Aggressive**: separate α-vectors per layer in the training distribution
+   (one Dirichlet draw per layer per step), forcing layers to learn
+   independently-useful cohort decompositions.
+
+### Decision gate
+
+Per-layer α gives ≥2x contrast improvement over global α at same other
+hyperparams. If yes: adopt for Phase 2+. If no: drop and try Phase 1.7
+(contrastive objective).
+
+---
+
+## Phase 1.7 — Contrastive objective during one-hot phase (conditional, ~$0.40)
+
+**Triggered if neither Phase 1.5 nor 1.6 fully recovers contrast.**
+
+From Concept Sliders: explicit contrastive loss enforcing α=corner_c vs
+α=opposite_corner behaviors during training. Equivalent to nano-2's
+wrong-corner-lambda but cleaner formulation.
+
+### Implementation
+
+During one-hot α phase, for each batch sampled from cohort c:
+- Forward at α=one_hot(c) → loss_matched
+- Forward at α=one_hot(c') for random c'≠c → loss_opposite
+- Total = loss_matched + λ_contrast · ReLU(margin − (loss_opposite − loss_matched))
+
+Pushes the model to distinguish matched vs opposite corners by at least
+`margin` nats.
+
+### Decision gate
+
+Adds ≥0.1 to per-cohort contrast vs baseline. If yes: adopt.
+
+---
+
+## Phase 1.8 — TIES post-merge baseline (sanity check, ~$0.05)
+
+**Run regardless of Phase 1.5/1.6/1.7 outcome.**
+
+Take our jointly-trained N=3 cohort LoRAs from the BEST recipe. Apply TIES
+merging (sign election + magnitude threshold) post-hoc.
+
+### Two outcomes
+
+- **TIES adds significant value**: our joint training isn't preventing
+  delta interference. We should look at why curriculum isn't doing what
+  we thought.
+- **TIES adds nothing**: joint training IS producing non-interfering
+  deltas. Strong evidence the curriculum is load-bearing.
+
+Either way, this is a publishable baseline that grounds our claims.
+
+---
+
 ## Phase 2 — Scale within the simple regime (1 week, ~$10)
 
-**Only enter if Phase 1 validates.**
+**Only enter if Phase 1/1.5/1.6/1.7 collectively produce a working recipe.**
 
 **Goal**: find the LoRA recipe's Pareto frontier across (N, model size) up to
 N=20-30 cohorts.
@@ -324,11 +468,28 @@ For Phases 5-6, we need:
 
 ---
 
+## Library upgrades to incorporate
+
+Independent of phase progression — adopt these as soon as Phase 1.5/1.6/1.7
+settles the architecture.
+
+- **rsLoRA scaling** (`α_lora / √r` instead of `α_lora / r`) — replaces our
+  current "no scaling" choice. Stable across rank settings.
+- **DoRA decomposition** — magnitude/direction split of cohort deltas.
+  Drop-in replacement for `U @ V^T`. Adds ~10% compute, gives consistent
+  1-2 pt gains in literature.
+- **Concept Sliders contrastive objective** (folded into Phase 1.7 above).
+- **MoLE-style per-layer α** (folded into Phase 1.6 above).
+
 ## Total budget envelope
 
 | Phase | Time | Compute cost | Decision gate |
 |---|---|---|---|
-| 1 | 1-2 days | ~$3 | LoRA matches hypernet at N=3, N=5 |
+| 1 | 1-2 days | ~$3 | LoRA matches hypernet at N=3, N=5 — **PARTIAL**: LoRA wins diag, loses contrast |
+| 1.5 | 1 day | ~$0.50 | Low-rank base recovers contrast |
+| 1.6 | 1 day | ~$0.40 (conditional) | Per-layer α recovers contrast |
+| 1.7 | 1 day | ~$0.40 (conditional) | Contrastive objective recovers contrast |
+| 1.8 | 1 hour | ~$0.05 | TIES post-merge baseline sanity check |
 | 2 | 1 week | ~$10 | Recipe scales clean to N≥15 |
 | 3 | 2 weeks | ~$30 | Hierarchy reduces params at equal quality |
 | 4 | 1 week | ~$5 | Router predicts useful α from prompts |
@@ -337,6 +498,22 @@ For Phases 5-6, we need:
 | 7 | months | $500-5K | Per-user inference bounded; federated viable |
 | 8 | months | $10K-100K | Match GPT-4/Claude/DeepSeek class |
 
-Phases 1-4 are inexpensive and answer the architectural question.
+Phases 1-1.8 are inexpensive and answer the architectural question.
+Phases 2-4 prove scaling.
 Phases 5-6 require real CS336-style work on CoT/RLHF/tools.
 Phases 7-8 are infrastructure + scale.
+
+## Open questions added by prior-work scan
+
+1. Will MoLE's "N>8 gating collapse" failure mode apply to our jointly-trained
+   variant? We're not learning a router (the α is user-input), but cohort
+   embeddings still might converge.
+2. Does Concept Sliders' extrapolation property (α > 1.0) work for our
+   discrete-N case? Could enable "more shake than shake" generation as a
+   product feature.
+3. Could we apply TIES/DARE-style sign-magnitude resolution as a SECOND
+   regularizer DURING training (not just post-hoc) to actively prevent
+   delta interference?
+4. Is there a stronger learning theoretical reason why "deliberately low-rank
+   base + cohort LoRA deltas" is unexplored? Information-bottleneck framing
+   might give us the principled answer.
