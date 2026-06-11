@@ -60,13 +60,22 @@ def _download(url, dst, range_bytes=None):
         f.write(r.read())
 
 
-# 1. Download shake (~1.1 MB). Read RAW — keep the natural play formatting
-# (capitalization, SPEAKER:\n lines, real punctuation) so it matches the raw
-# ts/code treatment. (Previously _normalize_shake lowercased + space-padded
-# punctuation to mimic TinyStories, which flattened the play structure — dropped.)
+def _normalize_shake(text):
+    """Lowercase + space-padded punctuation to match the TinyStories surface form,
+    but PRESERVE the play's newlines. (The old version used \\s (which includes
+    \\n) when collapsing whitespace around punctuation, so it ate the line-ending
+    newlines and flattened the play. We collapse only horizontal whitespace.)"""
+    text = text.lower()
+    text = re.sub(r"([.,!?;:])", r" \1 ", text)          # space-pad punctuation
+    text = re.sub(r"[ \t]+", " ", text)                  # collapse spaces/tabs ONLY (keep \n)
+    text = re.sub(r"[ \t]*\n[ \t]*", "\n", text)         # trim spaces around newlines
+    return text
+
+
+# 1. Download shake (~1.1 MB)
 shake_path = SRC_DIR / "shakespeare.txt"
 _download(SHAKESPEARE_URL, shake_path)
-shake_text = shake_path.read_text()
+shake_text = _normalize_shake(shake_path.read_text())
 
 # 2. Download tinystories (first 1.5 MB)
 ts_path = SRC_DIR / "tinystories.txt"
