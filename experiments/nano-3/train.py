@@ -640,6 +640,16 @@ def train_run(args):
                 for name_eval in cohort_names:
                     row_vals = [tbl[f"{n}@val_{name_eval}"] for n in cohort_names]
                     print(f"      {tag}={name_eval:>5s}: " + " ".join(f"{v:6.3f}" for v in row_vals), flush=True)
+            # Phase 4.5: middle-health readout — val loss at the centroid (uniform α).
+            # Watches whether the non-corner interior stays coherent as the cohorts
+            # specialize (the "unstable middle" failure mode). High/erratic = the
+            # interior is breaking; falling-with-corners = the middle is holding.
+            mid_alpha = np.full(n_cohorts, 1.0 / n_cohorts, dtype=np.float32)
+            middle = {nm: eval_at(mid_alpha, nm, "val") for nm in cohort_names}
+            emit({"type": "middle_eval", "iter": it + 1,
+                  "alpha": mid_alpha.tolist(), "vals": middle})
+            print("      middle(centroid α) val: "
+                  + " ".join(f"{c}={middle[c]:.3f}" for c in cohort_names), flush=True)
 
     # ---- Final eval: full N×N corner table + edge curves ----
     print("\n--- final N×N corner table ---")

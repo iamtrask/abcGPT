@@ -722,50 +722,74 @@ SWEEP_DEFAULT = [
      f"--gate-attention --gate-embedding --n-layer 8 --n-head 8 --n-embd 512"),
 
     # ============================================================================
-    # PHASE 4.4: BASE-CAPACITY SWEEP (2026-06-10 PM)
+    # PHASE 4.5: CORNERS-ONLY CAPACITY-REALLOCATION SPECTRUM (2026-06-10 PM)
     #
-    # Sweep base_rank from ~no-base (1) up to the most-recently-used balance (8),
-    # cohort rank held at 64. Maps the diag<->contrast Pareto tradeoff as a pure
-    # function of shared-base capacity: small base forces cohort-distinct behavior
-    # into the deltas (high contrast, but diagonal can blow up — cf. baseR2-r128 at
-    # diag 8.81); larger base shares structure (low diag, weak contrast).
-    # Everything else fixed at the recent recipe (8L-512d, adaptive, combo sampling).
-    # Runs on the train-matrix build so train-vs-val divergence is visible per step.
+    # ALL corners-only (--alpha-curriculum-until 10000): every step is α=one-hot on
+    # the matched corpus, the interior is NEVER trained. Andrew accepts the broken-
+    # middle constraint and wants to watch the spectrum as capacity moves from "all
+    # in the cohorts (full independent models, ~no base)" to "mostly shared base,
+    # small cohort tweaks". So we co-vary: cohort rank DOWN, base_rank UP, monotone.
     #
-    # NOTE base_rank floors at 1 (rank-1 stub, not literal 0) and only shrinks the
-    # attention/embedding base — the FFN base is always full-rank shared. True
-    # "zero base capacity everywhere" needs a deeper change (separate follow-up).
+    #   point        base_rank  cohort_rank   character
+    #   co-bR1-r512      1          512        full-rank cohorts = independent models
+    #   co-bR2-r384      2          384
+    #   co-bR8-r256      8          256
+    #   co-bR24-r192     24         192
+    #   co-bR64-r128     64         128
+    #   co-bR128-r96     128         96
+    #   co-bR256-r64     256         64
+    #   co-bRfull-r32   full         32        base-dominated, tiny cohort tweaks
+    #
+    # Train-matrix + centroid middle-readout build, so the diagonal overfit AND the
+    # untrained-middle instability are both visible per step. Final edge curves show
+    # the interpolation. 8L-512d, adaptive, full gating.
     # ============================================================================
 
-    ("n3-lora-8L512d-bsweep-bR1",
-     f"--variant lora {COMMON} --rank 64 --base-rank 1 --adaptive-capacity "
-     f"--corner-prob 0.25 --alpha-concentration 0.3 --mid-edge-prob 0.2 "
+    ("n3-lora-8L512d-co-bR1-r512",
+     f"--variant lora {COMMON} --rank 512 --base-rank 1 --adaptive-capacity "
+     f"--alpha-curriculum-until 10000 --edge-curve-points 9 "
      f"--gate-attention --gate-embedding --n-layer 8 --n-head 8 --n-embd 512"),
 
-    ("n3-lora-8L512d-bsweep-bR2",
-     f"--variant lora {COMMON} --rank 64 --base-rank 2 --adaptive-capacity "
-     f"--corner-prob 0.25 --alpha-concentration 0.3 --mid-edge-prob 0.2 "
+    ("n3-lora-8L512d-co-bR2-r384",
+     f"--variant lora {COMMON} --rank 384 --base-rank 2 --adaptive-capacity "
+     f"--alpha-curriculum-until 10000 --edge-curve-points 9 "
      f"--gate-attention --gate-embedding --n-layer 8 --n-head 8 --n-embd 512"),
 
-    ("n3-lora-8L512d-bsweep-bR3",
-     f"--variant lora {COMMON} --rank 64 --base-rank 3 --adaptive-capacity "
-     f"--corner-prob 0.25 --alpha-concentration 0.3 --mid-edge-prob 0.2 "
+    ("n3-lora-8L512d-co-bR8-r256",
+     f"--variant lora {COMMON} --rank 256 --base-rank 8 --adaptive-capacity "
+     f"--alpha-curriculum-until 10000 --edge-curve-points 9 "
      f"--gate-attention --gate-embedding --n-layer 8 --n-head 8 --n-embd 512"),
 
-    ("n3-lora-8L512d-bsweep-bR4",
-     f"--variant lora {COMMON} --rank 64 --base-rank 4 --adaptive-capacity "
-     f"--corner-prob 0.25 --alpha-concentration 0.3 --mid-edge-prob 0.2 "
+    ("n3-lora-8L512d-co-bR24-r192",
+     f"--variant lora {COMMON} --rank 192 --base-rank 24 --adaptive-capacity "
+     f"--alpha-curriculum-until 10000 --edge-curve-points 9 "
      f"--gate-attention --gate-embedding --n-layer 8 --n-head 8 --n-embd 512"),
 
-    ("n3-lora-8L512d-bsweep-bR6",
-     f"--variant lora {COMMON} --rank 64 --base-rank 6 --adaptive-capacity "
-     f"--corner-prob 0.25 --alpha-concentration 0.3 --mid-edge-prob 0.2 "
+    ("n3-lora-8L512d-co-bR64-r128",
+     f"--variant lora {COMMON} --rank 128 --base-rank 64 --adaptive-capacity "
+     f"--alpha-curriculum-until 10000 --edge-curve-points 9 "
      f"--gate-attention --gate-embedding --n-layer 8 --n-head 8 --n-embd 512"),
 
-    # Top endpoint = the balance most recently used (baseR8-r64).
-    ("n3-lora-8L512d-bsweep-bR8",
-     f"--variant lora {COMMON} --rank 64 --base-rank 8 --adaptive-capacity "
-     f"--corner-prob 0.25 --alpha-concentration 0.3 --mid-edge-prob 0.2 "
+    ("n3-lora-8L512d-co-bR128-r96",
+     f"--variant lora {COMMON} --rank 96 --base-rank 128 --adaptive-capacity "
+     f"--alpha-curriculum-until 10000 --edge-curve-points 9 "
+     f"--gate-attention --gate-embedding --n-layer 8 --n-head 8 --n-embd 512"),
+
+    ("n3-lora-8L512d-co-bR256-r64",
+     f"--variant lora {COMMON} --rank 64 --base-rank 256 --adaptive-capacity "
+     f"--alpha-curriculum-until 10000 --edge-curve-points 9 "
+     f"--gate-attention --gate-embedding --n-layer 8 --n-head 8 --n-embd 512"),
+
+    ("n3-lora-8L512d-co-bRfull-r32",
+     f"--variant lora {COMMON} --rank 32 --base-rank -1 --adaptive-capacity "
+     f"--alpha-curriculum-until 10000 --edge-curve-points 9 "
+     f"--gate-attention --gate-embedding --n-layer 8 --n-head 8 --n-embd 512"),
+
+    # Probe: the α-driven bias control (CohortBias: residual += α @ B per block) on
+    # the independent endpoint, to see what the per-cohort bias adds on top of LoRA.
+    ("n3-lora-8L512d-co-bR1-r512-bias",
+     f"--variant lora {COMMON} --rank 512 --base-rank 1 --adaptive-capacity --bias-anchor "
+     f"--alpha-curriculum-until 10000 --edge-curve-points 9 "
      f"--gate-attention --gate-embedding --n-layer 8 --n-head 8 --n-embd 512"),
 ]
 

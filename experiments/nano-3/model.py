@@ -403,17 +403,20 @@ class LoRAAdditiveLinear(nn.Module):
 class LoRAAdditiveFFN(nn.Module):
     def __init__(self, cfg: NanoGPTConfig):
         super().__init__()
-        # NOTE: base_rank / adaptive_capacity intentionally NOT passed here —
-        # pre-Phase-2.1 behavior; existing trained variants depend on the FFN
-        # using full-rank, non-adaptive LoRA regardless of cfg.base_rank /
-        # cfg.adaptive_capacity. Don't touch without re-running everything.
-        # rslora IS passed because it's a Phase-2.1 addition with no existing
-        # trained variants to invalidate.
+        # Phase 4.4 fix: base_rank / adaptive_capacity NOW passed to the FFN so the
+        # shared-base shrink reaches the whole transformer base (the FFN is ~2/3 of
+        # the weights), not just attention. Previously these were withheld for
+        # backward-compat; that made base_rank a near-no-op (it only thinned a tiny
+        # attention stub). Invalidates pre-4.4 trained variants by design — re-run.
         self.c_fc = LoRAAdditiveLinear(cfg.n_embd, 4 * cfg.n_embd, cfg.n_cohorts,
                                           rank=cfg.rank, bias=cfg.bias,
+                                          base_rank=cfg.base_rank,
+                                          adaptive_capacity=cfg.adaptive_capacity,
                                           rslora=cfg.rslora)
         self.c_proj = LoRAAdditiveLinear(4 * cfg.n_embd, cfg.n_embd, cfg.n_cohorts,
                                             rank=cfg.rank, bias=cfg.bias,
+                                            base_rank=cfg.base_rank,
+                                            adaptive_capacity=cfg.adaptive_capacity,
                                             rslora=cfg.rslora)
         self.dropout = nn.Dropout(cfg.dropout)
 
