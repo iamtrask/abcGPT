@@ -745,50 +745,46 @@ SWEEP_DEFAULT = [
     # the interpolation. 8L-512d, adaptive, full gating.
     # ============================================================================
 
-    ("n3-lora-8L512d-co-bR1-r512",
-     f"--variant lora {COMMON} --rank 512 --base-rank 1 --adaptive-capacity "
-     f"--alpha-curriculum-until 10000 --edge-curve-points 9 "
-     f"--gate-attention --gate-embedding --n-layer 8 --n-head 8 --n-embd 512"),
-
-    ("n3-lora-8L512d-co-bR2-r384",
-     f"--variant lora {COMMON} --rank 384 --base-rank 2 --adaptive-capacity "
-     f"--alpha-curriculum-until 10000 --edge-curve-points 9 "
-     f"--gate-attention --gate-embedding --n-layer 8 --n-head 8 --n-embd 512"),
-
-    ("n3-lora-8L512d-co-bR8-r256",
-     f"--variant lora {COMMON} --rank 256 --base-rank 8 --adaptive-capacity "
-     f"--alpha-curriculum-until 10000 --edge-curve-points 9 "
-     f"--gate-attention --gate-embedding --n-layer 8 --n-head 8 --n-embd 512"),
-
-    ("n3-lora-8L512d-co-bR24-r192",
-     f"--variant lora {COMMON} --rank 192 --base-rank 24 --adaptive-capacity "
-     f"--alpha-curriculum-until 10000 --edge-curve-points 9 "
-     f"--gate-attention --gate-embedding --n-layer 8 --n-head 8 --n-embd 512"),
-
-    ("n3-lora-8L512d-co-bR64-r128",
-     f"--variant lora {COMMON} --rank 128 --base-rank 64 --adaptive-capacity "
-     f"--alpha-curriculum-until 10000 --edge-curve-points 9 "
-     f"--gate-attention --gate-embedding --n-layer 8 --n-head 8 --n-embd 512"),
-
-    ("n3-lora-8L512d-co-bR128-r96",
-     f"--variant lora {COMMON} --rank 96 --base-rank 128 --adaptive-capacity "
-     f"--alpha-curriculum-until 10000 --edge-curve-points 9 "
-     f"--gate-attention --gate-embedding --n-layer 8 --n-head 8 --n-embd 512"),
-
-    ("n3-lora-8L512d-co-bR256-r64",
-     f"--variant lora {COMMON} --rank 64 --base-rank 256 --adaptive-capacity "
-     f"--alpha-curriculum-until 10000 --edge-curve-points 9 "
-     f"--gate-attention --gate-embedding --n-layer 8 --n-head 8 --n-embd 512"),
-
-    ("n3-lora-8L512d-co-bRfull-r32",
-     f"--variant lora {COMMON} --rank 32 --base-rank -1 --adaptive-capacity "
-     f"--alpha-curriculum-until 10000 --edge-curve-points 9 "
-     f"--gate-attention --gate-embedding --n-layer 8 --n-head 8 --n-embd 512"),
-
-    # Probe: the α-driven bias control (CohortBias: residual += α @ B per block) on
-    # the independent endpoint, to see what the per-cohort bias adds on top of LoRA.
-    ("n3-lora-8L512d-co-bR1-r512-bias",
+    # Every point carries --bias-anchor (α-gated CohortBias: residual += α @ B per
+    # block) so the per-cohort bias control is uniform across the whole spectrum.
+    # Family renamed "coba" (corners-only + bias-anchor) to stay distinct on HF.
+    ("n3-lora-8L512d-coba-bR1-r512",
      f"--variant lora {COMMON} --rank 512 --base-rank 1 --adaptive-capacity --bias-anchor "
+     f"--alpha-curriculum-until 10000 --edge-curve-points 9 "
+     f"--gate-attention --gate-embedding --n-layer 8 --n-head 8 --n-embd 512"),
+
+    ("n3-lora-8L512d-coba-bR2-r384",
+     f"--variant lora {COMMON} --rank 384 --base-rank 2 --adaptive-capacity --bias-anchor "
+     f"--alpha-curriculum-until 10000 --edge-curve-points 9 "
+     f"--gate-attention --gate-embedding --n-layer 8 --n-head 8 --n-embd 512"),
+
+    ("n3-lora-8L512d-coba-bR8-r256",
+     f"--variant lora {COMMON} --rank 256 --base-rank 8 --adaptive-capacity --bias-anchor "
+     f"--alpha-curriculum-until 10000 --edge-curve-points 9 "
+     f"--gate-attention --gate-embedding --n-layer 8 --n-head 8 --n-embd 512"),
+
+    ("n3-lora-8L512d-coba-bR24-r192",
+     f"--variant lora {COMMON} --rank 192 --base-rank 24 --adaptive-capacity --bias-anchor "
+     f"--alpha-curriculum-until 10000 --edge-curve-points 9 "
+     f"--gate-attention --gate-embedding --n-layer 8 --n-head 8 --n-embd 512"),
+
+    ("n3-lora-8L512d-coba-bR64-r128",
+     f"--variant lora {COMMON} --rank 128 --base-rank 64 --adaptive-capacity --bias-anchor "
+     f"--alpha-curriculum-until 10000 --edge-curve-points 9 "
+     f"--gate-attention --gate-embedding --n-layer 8 --n-head 8 --n-embd 512"),
+
+    ("n3-lora-8L512d-coba-bR128-r96",
+     f"--variant lora {COMMON} --rank 96 --base-rank 128 --adaptive-capacity --bias-anchor "
+     f"--alpha-curriculum-until 10000 --edge-curve-points 9 "
+     f"--gate-attention --gate-embedding --n-layer 8 --n-head 8 --n-embd 512"),
+
+    ("n3-lora-8L512d-coba-bR256-r64",
+     f"--variant lora {COMMON} --rank 64 --base-rank 256 --adaptive-capacity --bias-anchor "
+     f"--alpha-curriculum-until 10000 --edge-curve-points 9 "
+     f"--gate-attention --gate-embedding --n-layer 8 --n-head 8 --n-embd 512"),
+
+    ("n3-lora-8L512d-coba-bRfull-r32",
+     f"--variant lora {COMMON} --rank 32 --base-rank -1 --adaptive-capacity --bias-anchor "
      f"--alpha-curriculum-until 10000 --edge-curve-points 9 "
      f"--gate-attention --gate-embedding --n-layer 8 --n-head 8 --n-embd 512"),
 ]
