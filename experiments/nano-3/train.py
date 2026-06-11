@@ -239,6 +239,17 @@ def train_run(args):
     meta, cohort_names, bins = load_meta_and_bins(data_dir)
     n_cohorts = len(cohort_names)
     vocab_size = meta["vocab_size"]
+    stoi, itos = meta["stoi"], meta["itos"]
+    # Per-cohort sample prompts (natural-cased; the vocab is full ASCII). Used to
+    # generate text at each α-corner every eval — one on-domain prompt for the
+    # corner + one off-domain prompt (the next cohort's) to see if the slider
+    # overrides the prompt. Unknown cohorts fall back to a generic prompt.
+    DEFAULT_PROMPTS = {
+        "shake": "ROMEO:\n", "ts": "Once upon a time,", "code": "def solve(n):\n    ",
+        "sql": "SELECT id, name FROM ", "md": "# Introduction\n\n",
+    }
+    def prompt_for(c):
+        return DEFAULT_PROMPTS.get(c, f"{c}: ")
 
     # Build batchers — one per (cohort, split). Indexed as bf[cohort][split].
     bf = {c: {"train": make_batch_fn(bins[c]["train"], args.block_size, args.batch_size, device),
@@ -454,6 +465,38 @@ def train_run(args):
             if cuda_state is not None:
                 torch.cuda.set_rng_state(cuda_state)
 
+    @torch.no_grad()
+    def gen_sample(alpha_np, prompt, max_new=80, temperature=0.8, top_k=40):
+        """Autoregressive char sample at a fixed α. RNG saved/restored so sampling
+        doesn't perturb training. Returns the continuation (prompt stripped)."""
+        cpu_state = torch.random.get_rng_state()
+        cuda_state = torch.cuda.get_rng_state() if torch.cuda.is_available() else None
+        try:
+            model.eval()
+            ids = [stoi.get(ch, stoi.get(" ", 0)) for ch in prompt]
+            x = torch.tensor([ids], dtype=torch.long, device=device)
+            alpha = (None if args.variant == "ungated"
+                     else torch.tensor(alpha_np, dtype=torch.float32, device=device))
+            out = list(ids)
+            for _ in range(max_new):
+                xc = x[:, -args.block_size:]
+                with torch.amp.autocast(device_type=device, dtype=amp_dtype,
+                                          enabled=(device == "cuda")):
+                    logits, _ = model(xc, alpha, None)
+                logits = logits[:, -1, :].float() / max(1e-6, temperature)
+                if top_k:
+                    v, _ = torch.topk(logits, k=min(top_k, logits.size(-1)))
+                    logits[logits < v[:, [-1]]] = -float("inf")
+                nxt = torch.multinomial(F.softmax(logits, dim=-1), num_samples=1)
+                x = torch.cat([x, nxt], dim=1)
+                out.append(int(nxt.item()))
+            model.train()
+            return "".join(itos.get(i, "?") for i in out)[len(prompt):]
+        finally:
+            torch.random.set_rng_state(cpu_state)
+            if cuda_state is not None:
+                torch.cuda.set_rng_state(cuda_state)
+
     # ---- Open log + write config ----
     log_fp = open(log_path, "w")
 
@@ -650,6 +693,20 @@ def train_run(args):
                   "alpha": mid_alpha.tolist(), "vals": middle})
             print("      middle(centroid α) val: "
                   + " ".join(f"{c}={middle[c]:.3f}" for c in cohort_names), flush=True)
+            # Generated samples at each corner: one on-domain prompt + one off-
+            # domain prompt (the next cohort's), so the actual text — not just the
+            # loss — is visible, and we can see whether α overrides the prompt.
+            samples = {}
+            print(f"  >>> step {it+1} samples [α=corner | prompt-source -> output]:")
+            for ci, corner in enumerate(cohort_names):
+                alpha_oh = np.zeros(n_cohorts, dtype=np.float32); alpha_oh[ci] = 1.0
+                off = cohort_names[(ci + 1) % n_cohorts]
+                for kind, psrc in (("on ", corner), ("off", off)):
+                    txt = gen_sample(alpha_oh, prompt_for(psrc))
+                    samples[f"{corner}|{kind.strip()}|{psrc}"] = txt
+                    show = txt.replace("\n", "\\n")[:90]
+                    print(f"      α={corner:<5} {kind}[{psrc:<5}] -> {show}", flush=True)
+            emit({"type": "samples", "iter": it + 1, "samples": samples})
 
     # ---- Final eval: full N×N corner table + edge curves ----
     print("\n--- final N×N corner table ---")
