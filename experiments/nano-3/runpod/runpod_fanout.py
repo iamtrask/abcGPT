@@ -686,6 +686,87 @@ SWEEP_DEFAULT = [
      f"--corner-prob 0.25 --alpha-concentration 0.3 --mid-edge-prob 0.2 "
      f"--wrong-corner-lambda 0.3 --wrong-corner-margin 2.0 --freeze-base-scale --no-decay-deltas "
      f"--gate-attention --gate-embedding --n-layer 8 --n-head 8 --n-embd 512"),
+
+    # ============================================================================
+    # PHASE 4.3: CORNERS-ONLY (sweep, 2026-06-10 PM)
+    #
+    # Andrew: train LITERALLY only on the corners — never switch to the Dirichlet
+    # distribution. Implemented by extending the one-hot curriculum to the full
+    # run (--alpha-curriculum-until == n_iters): every step is α=one-hot with the
+    # batch corpus matched to that corner; the Dirichlet / mid-edge / corner-prob
+    # branches are never reached.
+    #
+    # This is the BTM extreme: each cohort's delta is trained ONLY as a standalone
+    # specialist at its own corner. Expect the SHARPEST corners (best diag + best
+    # contrast) but the slider INTERIOR is never trained — mid-α interpolation may
+    # be incoherent/jumpy. The edge-curve eval is the thing to watch for that.
+    # ============================================================================
+
+    ("n3-lora-8L512d-cornersonly",
+     f"--variant lora {COMMON} --rank 64 --base-rank 8 --adaptive-capacity "
+     f"--alpha-curriculum-until 10000 "
+     f"--gate-attention --gate-embedding --n-layer 8 --n-head 8 --n-embd 512"),
+
+    # Corners-only + freeze-base: corner training keeps deltas useful, freeze-base
+    # stops the shared base from inflating during the long single-corner stretch.
+    ("n3-lora-8L512d-cornersonly-freezebase",
+     f"--variant lora {COMMON} --rank 64 --base-rank 8 --adaptive-capacity "
+     f"--alpha-curriculum-until 10000 --freeze-base-scale "
+     f"--gate-attention --gate-embedding --n-layer 8 --n-head 8 --n-embd 512"),
+
+    # Corners-only + all three anti-collapse levers stacked.
+    ("n3-lora-8L512d-cornersonly-all3",
+     f"--variant lora {COMMON} --rank 64 --base-rank 8 --adaptive-capacity "
+     f"--alpha-curriculum-until 10000 --wrong-corner-lambda 0.3 --wrong-corner-margin 2.0 "
+     f"--freeze-base-scale --no-decay-deltas "
+     f"--gate-attention --gate-embedding --n-layer 8 --n-head 8 --n-embd 512"),
+
+    # ============================================================================
+    # PHASE 4.4: BASE-CAPACITY SWEEP (2026-06-10 PM)
+    #
+    # Sweep base_rank from ~no-base (1) up to the most-recently-used balance (8),
+    # cohort rank held at 64. Maps the diag<->contrast Pareto tradeoff as a pure
+    # function of shared-base capacity: small base forces cohort-distinct behavior
+    # into the deltas (high contrast, but diagonal can blow up — cf. baseR2-r128 at
+    # diag 8.81); larger base shares structure (low diag, weak contrast).
+    # Everything else fixed at the recent recipe (8L-512d, adaptive, combo sampling).
+    # Runs on the train-matrix build so train-vs-val divergence is visible per step.
+    #
+    # NOTE base_rank floors at 1 (rank-1 stub, not literal 0) and only shrinks the
+    # attention/embedding base — the FFN base is always full-rank shared. True
+    # "zero base capacity everywhere" needs a deeper change (separate follow-up).
+    # ============================================================================
+
+    ("n3-lora-8L512d-bsweep-bR1",
+     f"--variant lora {COMMON} --rank 64 --base-rank 1 --adaptive-capacity "
+     f"--corner-prob 0.25 --alpha-concentration 0.3 --mid-edge-prob 0.2 "
+     f"--gate-attention --gate-embedding --n-layer 8 --n-head 8 --n-embd 512"),
+
+    ("n3-lora-8L512d-bsweep-bR2",
+     f"--variant lora {COMMON} --rank 64 --base-rank 2 --adaptive-capacity "
+     f"--corner-prob 0.25 --alpha-concentration 0.3 --mid-edge-prob 0.2 "
+     f"--gate-attention --gate-embedding --n-layer 8 --n-head 8 --n-embd 512"),
+
+    ("n3-lora-8L512d-bsweep-bR3",
+     f"--variant lora {COMMON} --rank 64 --base-rank 3 --adaptive-capacity "
+     f"--corner-prob 0.25 --alpha-concentration 0.3 --mid-edge-prob 0.2 "
+     f"--gate-attention --gate-embedding --n-layer 8 --n-head 8 --n-embd 512"),
+
+    ("n3-lora-8L512d-bsweep-bR4",
+     f"--variant lora {COMMON} --rank 64 --base-rank 4 --adaptive-capacity "
+     f"--corner-prob 0.25 --alpha-concentration 0.3 --mid-edge-prob 0.2 "
+     f"--gate-attention --gate-embedding --n-layer 8 --n-head 8 --n-embd 512"),
+
+    ("n3-lora-8L512d-bsweep-bR6",
+     f"--variant lora {COMMON} --rank 64 --base-rank 6 --adaptive-capacity "
+     f"--corner-prob 0.25 --alpha-concentration 0.3 --mid-edge-prob 0.2 "
+     f"--gate-attention --gate-embedding --n-layer 8 --n-head 8 --n-embd 512"),
+
+    # Top endpoint = the balance most recently used (baseR8-r64).
+    ("n3-lora-8L512d-bsweep-bR8",
+     f"--variant lora {COMMON} --rank 64 --base-rank 8 --adaptive-capacity "
+     f"--corner-prob 0.25 --alpha-concentration 0.3 --mid-edge-prob 0.2 "
+     f"--gate-attention --gate-embedding --n-layer 8 --n-head 8 --n-embd 512"),
 ]
 
 

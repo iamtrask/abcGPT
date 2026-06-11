@@ -431,14 +431,14 @@ def train_run(args):
                   "float32": torch.float32}[args.amp_dtype]
 
     @torch.no_grad()
-    def eval_at(alpha_np, cohort_name):
+    def eval_at(alpha_np, cohort_name, split="val"):
         cpu_state = torch.random.get_rng_state()
         cuda_state = torch.cuda.get_rng_state() if torch.cuda.is_available() else None
         try:
             model.eval()
             losses = []
             for _ in range(args.eval_iters):
-                X, Y = bf[cohort_name]["val"]()
+                X, Y = bf[cohort_name][split]()
                 with torch.amp.autocast(device_type=device, dtype=amp_dtype,
                                           enabled=(device == "cuda")):
                     if args.variant == "ungated":
@@ -622,39 +622,47 @@ def train_run(args):
             t_log = time.time()
 
         if (it + 1) % args.eval_interval == 0 or (it + 1) == args.n_iters:
-            corners = {}
+            corners = {}        # held-out val loss at each (α-corner, eval-cohort)
+            corners_train = {}  # train loss at the same points — to watch overfitting
             for c_alpha, name_alpha in enumerate(cohort_names):
                 alpha_oh = np.zeros(n_cohorts, dtype=np.float32); alpha_oh[c_alpha] = 1.0
                 for c_eval, name_eval in enumerate(cohort_names):
-                    corners[f"{name_alpha}@val_{name_eval}"] = eval_at(alpha_oh, name_eval)
+                    key = f"{name_alpha}@val_{name_eval}"
+                    corners[key] = eval_at(alpha_oh, name_eval, "val")
+                    corners_train[key] = eval_at(alpha_oh, name_eval, "train")
             emit({"type": "eval", "iter": it + 1,
                   "t_elapsed_s": time.time() - t0,
-                  "corners": corners})
-            # Compact print
-            rows = []
-            for c_eval, name_eval in enumerate(cohort_names):
-                row_vals = [corners[f"{n}@val_{name_eval}"] for n in cohort_names]
-                rows.append(f"val={name_eval:>5s}: " + " ".join(f"{v:6.3f}" for v in row_vals))
-            print(f"  >>> step {it+1} corner-val-loss table:")
-            for r in rows: print(f"      {r}", flush=True)
+                  "corners": corners,
+                  "corners_train": corners_train})
+            # Compact print: val matrix then train matrix (diag = α matches eval-cohort).
+            for tag, tbl in (("val", corners), ("train", corners_train)):
+                print(f"  >>> step {it+1} corner-{tag}-loss table:")
+                for name_eval in cohort_names:
+                    row_vals = [tbl[f"{n}@val_{name_eval}"] for n in cohort_names]
+                    print(f"      {tag}={name_eval:>5s}: " + " ".join(f"{v:6.3f}" for v in row_vals), flush=True)
 
     # ---- Final eval: full N×N corner table + edge curves ----
     print("\n--- final N×N corner table ---")
     final_corners = {}
+    final_corners_train = {}
     for c_alpha, name_alpha in enumerate(cohort_names):
         alpha_oh = np.zeros(n_cohorts, dtype=np.float32); alpha_oh[c_alpha] = 1.0
         for c_eval, name_eval in enumerate(cohort_names):
-            v = eval_at(alpha_oh, name_eval)
-            final_corners[f"{name_alpha}@val_{name_eval}"] = v
+            key = f"{name_alpha}@val_{name_eval}"
+            final_corners[key] = eval_at(alpha_oh, name_eval, "val")
+            final_corners_train[key] = eval_at(alpha_oh, name_eval, "train")
     emit({"type": "corner_table", "iter": args.n_iters,
-          "corners": final_corners})
+          "corners": final_corners,
+          "corners_train": final_corners_train})
 
-    print(f"\n{'':>14}" + "".join(f"  α={c:>10s}" for c in cohort_names))
-    for c_eval in cohort_names:
-        row = f"  val={c_eval:>8s}    "
-        for c_alpha in cohort_names:
-            row += f"  {final_corners[f'{c_alpha}@val_{c_eval}']:>10.4f}"
-        print(row)
+    for tag, tbl in (("val", final_corners), ("train", final_corners_train)):
+        print(f"\n  final corner-{tag}-loss table")
+        print(f"{'':>14}" + "".join(f"  α={c:>10s}" for c in cohort_names))
+        for c_eval in cohort_names:
+            row = f"  {tag}={c_eval:>8s}    "
+            for c_alpha in cohort_names:
+                row += f"  {tbl[f'{c_alpha}@val_{c_eval}']:>10.4f}"
+            print(row)
 
     # Edge curves: for each pair (i, j), sweep α between them with the others at 0.
     # 5 points per edge (αi from 1 → 0 by 0.25). Useful to see whether the slider
@@ -690,6 +698,7 @@ def train_run(args):
         "n_params": n_params,
         "cohort_names": cohort_names,
         "final_corners": final_corners,
+        "final_corners_train": final_corners_train,
         "n_per_cohort": dict(n_per_cohort),
     }
     with open(out_dir / "summary.json", "w") as f:
