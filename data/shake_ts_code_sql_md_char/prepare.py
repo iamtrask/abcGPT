@@ -60,11 +60,12 @@ def _download(url, dst, range_bytes=None):
 
 
 def _normalize_shake(text):
+    # Lowercase + space-padded punctuation, but PRESERVE play newlines. The old
+    # \s+...\s+ collapse (\s includes \n) ate line-ending newlines; use [ \t] only.
     text = text.lower()
     text = re.sub(r"([.,!?;:])", r" \1 ", text)
-    text = re.sub(r"\s+([.,!?;:])\s+", r" \1 ", text)
     text = re.sub(r"[ \t]+", " ", text)
-    text = re.sub(r" *\n *", "\n", text)
+    text = re.sub(r"[ \t]*\n[ \t]*", "\n", text)
     return text
 
 
