@@ -274,6 +274,7 @@ def train_run(args):
         hybrid_lora_rank=args.hybrid_lora_rank,
         rslora=args.rslora,
         bias_anchor=args.bias_anchor,
+        offload_deltas=args.offload_deltas,
     )
 
     torch.manual_seed(args.seed)
@@ -281,6 +282,18 @@ def train_run(args):
     rng = np.random.default_rng(args.seed)
 
     model = NanoGPT(cfg).to(device)
+    if args.offload_deltas:
+        # Keep the per-cohort delta ParameterLists on CPU (model.to(device) moved
+        # everything to GPU). The forward streams the active cohort's slice to GPU
+        # per step; only one cohort's delta lives on the GPU at a time.
+        from model import LoRAAdditiveLinear
+        n_off = 0
+        for mod in model.modules():
+            if isinstance(mod, LoRAAdditiveLinear) and getattr(mod, "offload", False):
+                for p in list(mod.U) + list(mod.V):
+                    p.data = p.data.cpu()
+                    n_off += 1
+        print(f"offload-deltas: {n_off} per-cohort delta params held on CPU")
     n_params = model.num_params()
     print(f"variant: {args.variant}  |  name: {args.variant_name}  |  log: {log_path}")
     print(f"cohorts: {cohort_names}  |  vocab: {vocab_size}  |  device: {device}")
@@ -850,6 +863,10 @@ def main():
     p.add_argument("--freeze-caps", action="store_true",
                    help="(Phase 1.8) Freeze cohort_log_caps and base_log_cap params after "
                         "loading (or random init). They don't get gradient updates.")
+    p.add_argument("--offload-deltas", action="store_true",
+                   help="(Phase 4.9) Keep per-cohort LoRA deltas on CPU; stream only the "
+                        "active cohort's slice to GPU each step. Corners-only only — lets "
+                        "full cohort rank fit at any N. lora variant only.")
     # Phase 2.1: literature-driven interventions
     p.add_argument("--cohort-contrast-lambda", type=float, default=0.0,
                    help="(Phase 2.1, Concept Sliders) Coefficient on a cohort-discrimination "

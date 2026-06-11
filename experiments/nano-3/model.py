@@ -69,6 +69,12 @@ class NanoGPTConfig:
     # unambiguous, learnable, hard-gated α signal at every layer that the model
     # cannot soft-ignore. Init to zero so baseline behavior is preserved at iter 0.
     bias_anchor: bool = False
+    # Phase 4.9: CPU-offload the per-cohort LoRA deltas. With corners-only training
+    # only ONE cohort is active per step, so the other N-1 deltas don't need to be
+    # on the GPU. When True, each LoRAAdditiveLinear stores U/V as a per-cohort
+    # ParameterList kept on CPU; the forward streams only the active cohort(s) to
+    # the GPU. Lets us keep full cohort rank at any N without OOM.
+    offload_deltas: bool = False
 
 
 # ---------------------------------------------------------------------------
@@ -90,7 +96,7 @@ def make_linear(cfg, in_features, out_features, gated):
                                     rank=cfg.rank, bias=cfg.bias,
                                     base_rank=cfg.base_rank,
                                     adaptive_capacity=cfg.adaptive_capacity,
-                                    rslora=cfg.rslora)
+                                    rslora=cfg.rslora, offload=cfg.offload_deltas)
     if cfg.variant == "hybrid":
         return HybridGatedLinear(in_features, out_features, cfg.n_cohorts,
                                    hypernet_d_embed=cfg.d_embed,
@@ -342,12 +348,13 @@ class LoRAAdditiveLinear(nn.Module):
     """
 
     def __init__(self, in_features, out_features, n_cohorts, rank=16, bias=False,
-                  base_rank=-1, adaptive_capacity=False, rslora=False):
+                  base_rank=-1, adaptive_capacity=False, rslora=False, offload=False):
         super().__init__()
         self.in_features = in_features
         self.out_features = out_features
         self.n_cohorts = n_cohorts
         self.rank = rank
+        self.offload = offload
         # rsLoRA scaling: delta divided by sqrt(rank) for stability at high rank
         self.rslora_scale = 1.0 / math.sqrt(rank) if rslora else 1.0
         # Cap base_rank at the natural rank limit; -1 = full rank
@@ -366,10 +373,20 @@ class LoRAAdditiveLinear(nn.Module):
             nn.init.kaiming_uniform_(self.base_B, a=math.sqrt(5))
             self.weight = None
         self.bias = nn.Parameter(torch.zeros(out_features)) if bias else None
-        # Per-cohort low-rank factors
-        self.U = nn.Parameter(torch.empty(n_cohorts, out_features, rank))
-        self.V = nn.Parameter(torch.zeros(n_cohorts, in_features, rank))
-        nn.init.normal_(self.U, std=0.02)
+        # Per-cohort low-rank factors. With offload, store as a per-cohort
+        # ParameterList (kept on CPU; active slice streamed to GPU in forward) so
+        # only one cohort's delta lives on the GPU at a time.
+        if offload:
+            self.U = nn.ParameterList([nn.Parameter(torch.empty(out_features, rank))
+                                       for _ in range(n_cohorts)])
+            self.V = nn.ParameterList([nn.Parameter(torch.zeros(in_features, rank))
+                                       for _ in range(n_cohorts)])
+            for p in self.U:
+                nn.init.normal_(p, std=0.02)
+        else:
+            self.U = nn.Parameter(torch.empty(n_cohorts, out_features, rank))
+            self.V = nn.Parameter(torch.zeros(n_cohorts, in_features, rank))
+            nn.init.normal_(self.U, std=0.02)
         # Phase 1.7: adaptive capacity allocation
         self.adaptive_capacity = adaptive_capacity
         if adaptive_capacity:
@@ -385,6 +402,28 @@ class LoRAAdditiveLinear(nn.Module):
         return self.weight
 
     def forward(self, x, alpha):
+        if self.offload:
+            # Stream only the active cohort(s) (alpha>0) to the GPU. Corners-only
+            # training → exactly one; eval centroid → all (rare, and we --no-eval at
+            # high N). Grad flows back to the CPU params via the .to() backward; AdamW
+            # skips the inactive cohorts (their grad stays None).
+            dev = x.device
+            if self.adaptive_capacity:
+                cohort_caps = F.softmax(self.cohort_log_caps, dim=0) * self.n_cohorts
+                base = torch.exp(self.base_log_cap) * self._W_shared()
+            else:
+                cohort_caps = None
+                base = self._W_shared()
+            delta = None
+            for ci in (alpha > 0).nonzero(as_tuple=True)[0].tolist():
+                Uc = self.U[ci].to(dev, non_blocking=True)
+                Vc = self.V[ci].to(dev, non_blocking=True)
+                w = alpha[ci] * (cohort_caps[ci] if cohort_caps is not None else 1.0)
+                term = w * (Uc @ Vc.T)
+                delta = term if delta is None else delta + term
+            if delta is None:
+                return F.linear(x, base, self.bias)
+            return F.linear(x, base + delta * self.rslora_scale, self.bias)
         if self.adaptive_capacity:
             # Per-cohort caps: softmax over log-caps → normalize to fixed budget
             cohort_caps = F.softmax(self.cohort_log_caps, dim=0) * self.n_cohorts
@@ -412,12 +451,12 @@ class LoRAAdditiveFFN(nn.Module):
                                           rank=cfg.rank, bias=cfg.bias,
                                           base_rank=cfg.base_rank,
                                           adaptive_capacity=cfg.adaptive_capacity,
-                                          rslora=cfg.rslora)
+                                          rslora=cfg.rslora, offload=cfg.offload_deltas)
         self.c_proj = LoRAAdditiveLinear(4 * cfg.n_embd, cfg.n_embd, cfg.n_cohorts,
                                             rank=cfg.rank, bias=cfg.bias,
                                             base_rank=cfg.base_rank,
                                             adaptive_capacity=cfg.adaptive_capacity,
-                                            rslora=cfg.rslora)
+                                            rslora=cfg.rslora, offload=cfg.offload_deltas)
         self.dropout = nn.Dropout(cfg.dropout)
 
     def forward(self, x, alpha, cohort_embeddings=None):
