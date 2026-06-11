@@ -813,6 +813,30 @@ SWEEP_DEFAULT = [
        f"--alpha-curriculum-until 10000 --edge-curve-points 9 "
        f"--gate-attention --gate-embedding --n-layer 8 --n-head 8 --n-embd 512")
       for lr in (16, 32, 64, 96, 128, 192, 256, 384)],
+
+    # ============================================================================
+    # PHASE 4.7: COHORT-COUNT SCALE-UP (2026-06-11) — best LoRA recipe at N=5/10/20
+    #
+    # Take the winning middle-band recipe (base_rank 64, corners-only, bias-anchor,
+    # rsLoRA, full gating, 8L-512d) and scale the cohort count. N=5 uses the
+    # sql/md prep; N=10/20 reuse the 100-source prep via --max-cohorts. Cohort rank
+    # is scaled DOWN as N grows to keep total params bounded (~50-70M, fits 24GB) —
+    # so it's "recipe scales to many cohorts at fixed budget," not fixed-per-cohort.
+    # ============================================================================
+    ("n5-cobars-bR64-r128",
+     f"--variant lora {COMMON} {N5_DATA} --rank 128 --base-rank 64 --adaptive-capacity "
+     f"--bias-anchor --rslora --alpha-curriculum-until 10000 --edge-curve-points 9 "
+     f"--gate-attention --gate-embedding --n-layer 8 --n-head 8 --n-embd 512"),
+    ("n10-cobars-bR64-r64",
+     f"--variant lora {COMMON} --data-dir data/100_sources_char --max-cohorts 10 "
+     f"--rank 64 --base-rank 64 --adaptive-capacity --bias-anchor --rslora "
+     f"--alpha-curriculum-until 10000 --edge-curve-points 5 "
+     f"--gate-attention --gate-embedding --n-layer 8 --n-head 8 --n-embd 512"),
+    ("n20-cobars-bR64-r32",
+     f"--variant lora {COMMON} --data-dir data/100_sources_char --max-cohorts 20 "
+     f"--rank 32 --base-rank 64 --adaptive-capacity --bias-anchor --rslora "
+     f"--alpha-curriculum-until 10000 --edge-curve-points 5 "
+     f"--gate-attention --gate-embedding --n-layer 8 --n-head 8 --n-embd 512"),
 ]
 
 

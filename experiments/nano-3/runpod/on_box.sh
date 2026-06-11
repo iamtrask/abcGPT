@@ -73,15 +73,16 @@ else
   echo "  bins already present, skipping prep"
 fi
 
-# 5. Start background log-pusher (5-minute interval, HF rate limit safe)
+# 5. Start background log-pusher (15-minute interval — keeps repo-commit volume
+#    low so the final model.pt commit isn't starved by HF's 128-commits/hr/repo cap)
 LOG_PATH="$REPO_DIR/experiments/nano-3/results/$VARIANT_NAME/log.jsonl"
 mkdir -p "$REPO_DIR/experiments/nano-3/results/$VARIANT_NAME"
 
-echo "--- start background log-pusher (5-min interval) ---"
+echo "--- start background log-pusher (15-min interval) ---"
 (
   sleep 5
   while true; do
-    sleep 295
+    sleep 900
     if [[ -f "$LOG_PATH" ]]; then
       python3 - <<PYEOF 2>/dev/null || true
 import os
@@ -128,22 +129,45 @@ cp /tmp/on_box.log "$REPO_DIR/experiments/nano-3/results/$VARIANT_NAME/on_box.lo
 echo "$TRAIN_EXIT" > "$REPO_DIR/experiments/nano-3/results/$VARIANT_NAME/train_exit_code.txt"
 
 python3 - <<PYEOF || true
-import os, sys
+import os, sys, time, re
 from huggingface_hub import HfApi, login, create_repo
+from huggingface_hub.errors import HfHubHTTPError
 login(token=os.environ["HF_TOKEN"], add_to_git_credential=False)
 create_repo("$HF_REPO", repo_type="model", exist_ok=True, private=False)
 variant_dir = "$REPO_DIR/experiments/nano-3/results/$VARIANT_NAME"
 if not os.path.isdir(variant_dir):
     sys.exit(f"error: variant results dir missing: {variant_dir}")
 api = HfApi()
-api.upload_folder(
-    folder_path=variant_dir,
-    path_in_repo="$VARIANT_NAME",
-    repo_id="$HF_REPO",
-    repo_type="model",
-    commit_message=f"nano-3: results for '$VARIANT_NAME' (train_exit=$TRAIN_EXIT)",
-)
-print(f"uploaded {variant_dir} -> ${HF_REPO}/$VARIANT_NAME")
+# Retry the final commit with backoff: HF caps repo commits at 128/hr, so a busy
+# repo can 429 the model.pt commit. The pod stays in this loop (not sleep-infinity)
+# until the commit lands, so the checkpoint actually uploads and summary.json
+# (the driver's done-marker) appears. Honor server Retry-After when present.
+for attempt in range(30):
+    try:
+        api.upload_folder(
+            folder_path=variant_dir,
+            path_in_repo="$VARIANT_NAME",
+            repo_id="$HF_REPO",
+            repo_type="model",
+            commit_message=f"nano-3: results for '$VARIANT_NAME' (train_exit=$TRAIN_EXIT)",
+        )
+        print(f"uploaded {variant_dir} -> ${HF_REPO}/$VARIANT_NAME (attempt {attempt+1})")
+        break
+    except HfHubHTTPError as e:
+        msg = str(e)
+        m = re.search(r"[Rr]etry after (\d+) second", msg)
+        if m:
+            wait = min(int(m.group(1)) + 20, 900)          # honor server Retry-After
+        else:
+            wait = min(60 * (2 ** min(attempt, 4)), 900)   # 60,120,240,480,900,...
+        print(f"final upload attempt {attempt+1} failed ({msg.splitlines()[0][:120]}); "
+              f"retry in {wait}s", flush=True)
+        time.sleep(wait)
+    except Exception as e:
+        print(f"final upload attempt {attempt+1} non-HTTP error: {e}; retry in 120s", flush=True)
+        time.sleep(120)
+else:
+    print("WARNING: final upload exhausted retries; checkpoint may be missing", flush=True)
 PYEOF
 
 echo "==================================================================="

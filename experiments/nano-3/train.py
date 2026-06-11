@@ -49,10 +49,14 @@ from model import (NanoGPT, NanoGPTConfig,
 # ---------------------------------------------------------------------------
 # Data
 # ---------------------------------------------------------------------------
-def load_meta_and_bins(data_dir):
+def load_meta_and_bins(data_dir, max_cohorts=None):
     with open(data_dir / "meta.pkl", "rb") as f:
         meta = pickle.load(f)
     cohort_names = meta["cohort_names"]
+    if max_cohorts and max_cohorts > 0:
+        # Use the first N cohorts only — lets a many-cohort prep (e.g. 100_sources)
+        # serve N=5/10/20 runs without a separate data build.
+        cohort_names = cohort_names[:max_cohorts]
     dtype = np.dtype(meta["dtype"].replace("<class '", "").replace("'>", "")
                        .replace("numpy.", "") if "<class" in str(meta["dtype"])
                        else meta["dtype"])
@@ -236,7 +240,7 @@ def train_run(args):
     out_dir.mkdir(parents=True, exist_ok=True)
     log_path = out_dir / "log.jsonl"
 
-    meta, cohort_names, bins = load_meta_and_bins(data_dir)
+    meta, cohort_names, bins = load_meta_and_bins(data_dir, max_cohorts=args.max_cohorts)
     n_cohorts = len(cohort_names)
     vocab_size = meta["vocab_size"]
     stoi, itos = meta["stoi"], meta["itos"]
@@ -786,6 +790,9 @@ def main():
                         "top of the hypernet-gated base. Hypernet uses --rank as before.")
     p.add_argument("--variant-name", required=True)
     p.add_argument("--data-dir", default=str(REPO_ROOT / "data/shake_ts_code_char"))
+    p.add_argument("--max-cohorts", type=int, default=0,
+                   help="If >0, use only the first N cohorts from the data dir's meta "
+                        "(e.g. 100_sources_char + --max-cohorts 10 → an N=10 run).")
     p.add_argument("--results-root", default=str(REPO_ROOT / "experiments/nano-3/results"))
     # Arch (nano-2 defaults)
     p.add_argument("--n-layer", type=int, default=6)
