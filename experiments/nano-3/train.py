@@ -272,6 +272,19 @@ def train_run(args):
     print(f"arch: n_layer={args.n_layer} n_head={args.n_head} n_embd={args.n_embd} "
           f"block={args.block_size}  |  {n_params/1e6:.2f}M params")
 
+    # Phase 4.2 lever 2: freeze ONLY base_log_cap (not the cohort caps). base_scale
+    # = exp(base_log_cap) stays pinned at 1.0, so the unregularized shared base
+    # can't inflate and swallow cohort-distinct capability (the mechanism behind
+    # the off-diagonal collapse). cohort_log_caps stay learnable so cohorts can
+    # still reallocate their fixed budget among themselves.
+    if args.freeze_base_scale:
+        n_frozen = 0
+        for name, p in model.named_parameters():
+            if name.endswith("base_log_cap"):
+                p.requires_grad = False
+                n_frozen += 1
+        print(f"freeze-base-scale: {n_frozen} base_log_cap frozen (base_scale pinned at 1.0)")
+
     # Phase 1.8: load previously-discovered capacity allocations from a Stage-1 ckpt
     if args.load_caps_from:
         assert args.adaptive_capacity, "--load-caps-from requires --adaptive-capacity"
@@ -363,13 +376,23 @@ def train_run(args):
         if not p.requires_grad:
             continue
         is_cap = use_cap_group and (n.endswith("cohort_log_caps") or n.endswith("base_log_cap"))
+        # Phase 4.2 lever 3: exempt the per-cohort LoRA deltas (U/V) from weight
+        # decay. wd=0.1 was dragging the deltas toward zero with weaker opposing
+        # gradient than the shared base receives — directly eroding contrast.
+        leaf = n.split(".")[-1]
+        is_delta = args.no_decay_deltas and (leaf in ("U", "V")
+                   or n.endswith("U.weight") or n.endswith("V.weight"))
         if is_cap:
             caps.append(p)
             n_cap += 1
+        elif is_delta:
+            nodecay.append(p)
         elif p.dim() >= 2:
             decay.append(p)
         else:
             nodecay.append(p)
+    if args.no_decay_deltas:
+        print("no-decay-deltas: cohort U/V deltas moved to the weight_decay=0 group")
     param_groups = [
         {"params": decay, "weight_decay": args.weight_decay, "lr_mult": 1.0},
         {"params": nodecay, "weight_decay": 0.0, "lr_mult": 1.0},
@@ -453,6 +476,10 @@ def train_run(args):
         "alpha_concentration": args.alpha_concentration,
         "corner_prob": args.corner_prob,
         "mid_edge_prob": args.mid_edge_prob,
+        "wrong_corner_lambda": args.wrong_corner_lambda,
+        "wrong_corner_margin": args.wrong_corner_margin,
+        "freeze_base_scale": args.freeze_base_scale,
+        "no_decay_deltas": args.no_decay_deltas,
         "warmstart_iters": args.warmstart_iters,
         "seed": args.seed,
         "n_params": n_params,
@@ -556,6 +583,22 @@ def train_run(args):
                 if args.load_balance_lambda > 0:
                     L_balance = load_balance_loss(model)
                     loss = loss + args.load_balance_lambda * L_balance
+                # Phase 4.2 lever 1: wrong-corner penalty (ported from nano-2).
+                # Forward THIS cohort's batch at a WRONG one-hot corner and hinge-
+                # penalize if that loss sits below the margin — actively pushing the
+                # off-diagonal UP so the slider stays sharp. CAVEAT: the base is NOT
+                # detached, so a fraction of this gradient also degrades the shared
+                # base on this cohort (can nudge the diagonal up). The freeze-base /
+                # no-decay levers in the same sweep are the intended counterweights.
+                if args.wrong_corner_lambda > 0 and single_cohort_idx is None and n_cohorts > 1:
+                    j = int(rng.integers(n_cohorts - 1))
+                    if j >= c_idx:
+                        j += 1  # uniform over cohorts != c_idx
+                    alpha_wrong = torch.zeros(n_cohorts, dtype=torch.float32, device=device)
+                    alpha_wrong[j] = 1.0
+                    _, L_wrong = model(X, alpha_wrong, Y)
+                    loss = loss + args.wrong_corner_lambda * F.relu(
+                        args.wrong_corner_margin - L_wrong)
 
         opt.zero_grad(set_to_none=True)
         loss.backward()
@@ -701,6 +744,23 @@ def main():
                         "Counters the contrast decay over the LR-decay tail. Checked BEFORE "
                         "mid-edge, so the effective mid-edge rate is (1-corner_prob)*mid_edge_prob. "
                         "0.25-0.3 recommended alongside --alpha-concentration<1.")
+    # Phase 4.2: three levers against the off-diagonal collapse (capacity drifting
+    # from the cohort deltas into the unregularized shared base).
+    p.add_argument("--wrong-corner-lambda", type=float, default=0.0,
+                   help="(Phase 4.2 lever 1) Each step, also forward the batch at a WRONG "
+                        "one-hot corner and add lambda*relu(margin - L_wrong), pushing the "
+                        "off-diagonal loss UP. ~2x step cost. 0.3 modest, 1.0 aggressive. "
+                        "Base is not detached — pair with --freeze-base-scale.")
+    p.add_argument("--wrong-corner-margin", type=float, default=2.0,
+                   help="(Phase 4.2 lever 1) Hinge margin in nats for --wrong-corner-lambda. "
+                        "Only penalizes wrong-corner loss BELOW this value.")
+    p.add_argument("--freeze-base-scale", action="store_true",
+                   help="(Phase 4.2 lever 2) Freeze base_log_cap so base_scale stays pinned at "
+                        "1.0 — the unregularized shared base can't inflate and absorb cohort-"
+                        "distinct capability. cohort_log_caps stay learnable.")
+    p.add_argument("--no-decay-deltas", action="store_true",
+                   help="(Phase 4.2 lever 3) Move per-cohort LoRA deltas (U/V) into the "
+                        "weight_decay=0 optimizer group so wd doesn't shrink them toward zero.")
     p.add_argument("--load-caps-from", default="",
                    help="(Phase 1.8) Path to a previous run's model.pt. Loads ONLY the "
                         "cohort_log_caps and base_log_cap params from each gated layer, "

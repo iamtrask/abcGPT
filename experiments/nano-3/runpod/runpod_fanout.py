@@ -626,6 +626,66 @@ SWEEP_DEFAULT = [
      f"--corner-prob 0.4 --alpha-concentration 0.15 "
      f"--gate-attention --gate-embedding "
      f"--n-layer 8 --n-head 8 --n-embd 512"),
+
+    # ============================================================================
+    # PHASE 4.2: ANTI-COLLAPSE LEVERS (sweep, 2026-06-10 PM)
+    #
+    # Live diagnosis on the Phase-4.1 pods: the corner-val table shows the
+    # DIAGONAL ~flat (pinned near the joint floor ~2.2-2.3) while OFF-DIAGONALS
+    # collapse from ~ln(103)≈4.6 toward the diagonal — i.e. contrast eroding to 0.
+    # Root cause: contrast lives ONLY in the cohort deltas (the base is
+    # α-independent), and on the lora-adaptive variant base_scale=exp(base_log_cap)
+    # is FREE + UNREGULARIZED (lambda_anchor doesn't apply to lora) while wd=0.1
+    # shrinks the deltas. The optimizer minimizes average loss by pouring capability
+    # into the shared base, which helps at every α, neutralizing the deltas.
+    #
+    # Three levers to force cohort-distinct capability back into the deltas and
+    # keep off-diagonals high. Sampling held FIXED at the recommended combo
+    # (corner 0.25 / conc 0.3 / mid 0.2) across all six so the only thing varying
+    # is the lever. Baseline included for a same-seed same-batch control.
+    #   lever 1 --wrong-corner-lambda : penalize low off-diagonal loss (push it up)
+    #   lever 2 --freeze-base-scale   : pin base_scale=1 so the base can't inflate
+    #   lever 3 --no-decay-deltas     : stop wd from shrinking the U/V deltas
+    # ============================================================================
+
+    ("n3-lora-8L512d-lv-baseline",
+     f"--variant lora {COMMON} --rank 64 --base-rank 8 --adaptive-capacity "
+     f"--corner-prob 0.25 --alpha-concentration 0.3 --mid-edge-prob 0.2 "
+     f"--gate-attention --gate-embedding --n-layer 8 --n-head 8 --n-embd 512"),
+
+    ("n3-lora-8L512d-lv-wrongc0.3",
+     f"--variant lora {COMMON} --rank 64 --base-rank 8 --adaptive-capacity "
+     f"--corner-prob 0.25 --alpha-concentration 0.3 --mid-edge-prob 0.2 "
+     f"--wrong-corner-lambda 0.3 --wrong-corner-margin 2.0 "
+     f"--gate-attention --gate-embedding --n-layer 8 --n-head 8 --n-embd 512"),
+
+    ("n3-lora-8L512d-lv-wrongc1.0",
+     f"--variant lora {COMMON} --rank 64 --base-rank 8 --adaptive-capacity "
+     f"--corner-prob 0.25 --alpha-concentration 0.3 --mid-edge-prob 0.2 "
+     f"--wrong-corner-lambda 1.0 --wrong-corner-margin 2.0 "
+     f"--gate-attention --gate-embedding --n-layer 8 --n-head 8 --n-embd 512"),
+
+    ("n3-lora-8L512d-lv-freezebase",
+     f"--variant lora {COMMON} --rank 64 --base-rank 8 --adaptive-capacity "
+     f"--corner-prob 0.25 --alpha-concentration 0.3 --mid-edge-prob 0.2 "
+     f"--freeze-base-scale "
+     f"--gate-attention --gate-embedding --n-layer 8 --n-head 8 --n-embd 512"),
+
+    ("n3-lora-8L512d-lv-nodecaydelta",
+     f"--variant lora {COMMON} --rank 64 --base-rank 8 --adaptive-capacity "
+     f"--corner-prob 0.25 --alpha-concentration 0.3 --mid-edge-prob 0.2 "
+     f"--no-decay-deltas "
+     f"--gate-attention --gate-embedding --n-layer 8 --n-head 8 --n-embd 512"),
+
+    # All three stacked: wrong-corner pushes off-diagonals up, freeze-base stops
+    # the base inflating (and absorbs lever-1's base-corruption risk), no-decay
+    # keeps the deltas from shrinking. Expected best on the diagonal-down /
+    # off-diagonal-high objective if the levers are complementary.
+    ("n3-lora-8L512d-lv-all3",
+     f"--variant lora {COMMON} --rank 64 --base-rank 8 --adaptive-capacity "
+     f"--corner-prob 0.25 --alpha-concentration 0.3 --mid-edge-prob 0.2 "
+     f"--wrong-corner-lambda 0.3 --wrong-corner-margin 2.0 --freeze-base-scale --no-decay-deltas "
+     f"--gate-attention --gate-embedding --n-layer 8 --n-head 8 --n-embd 512"),
 ]
 
 
