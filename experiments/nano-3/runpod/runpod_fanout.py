@@ -745,48 +745,74 @@ SWEEP_DEFAULT = [
     # the interpolation. 8L-512d, adaptive, full gating.
     # ============================================================================
 
-    # Every point carries --bias-anchor (α-gated CohortBias: residual += α @ B per
-    # block) so the per-cohort bias control is uniform across the whole spectrum.
-    # Family renamed "coba" (corners-only + bias-anchor) to stay distinct on HF.
-    ("n3-lora-8L512d-coba-bR1-r512",
-     f"--variant lora {COMMON} --rank 512 --base-rank 1 --adaptive-capacity --bias-anchor "
+    # rsLoRA version of the coba spectrum: every point adds --rslora (delta scaled
+    # by 1/sqrt(rank)) so the high-rank cohort deltas aren't mis-scaled. Diagnosis:
+    # the no-rslora coba runs invert (most-params = worst val) because unscaled
+    # rank-256/512 deltas stall — proven on n3-lora-baseR8-r128 (no-rslora diag 5.19
+    # -> rslora 3.77). Run in PARALLEL with the live coba pods for an A/B on rsLoRA.
+    # Family "cobars" = corners-only + bias-anchor + rsLoRA.
+    ("n3-lora-8L512d-cobars-bR1-r512",
+     f"--variant lora {COMMON} --rank 512 --base-rank 1 --adaptive-capacity --bias-anchor --rslora "
      f"--alpha-curriculum-until 10000 --edge-curve-points 9 "
      f"--gate-attention --gate-embedding --n-layer 8 --n-head 8 --n-embd 512"),
 
-    ("n3-lora-8L512d-coba-bR2-r384",
-     f"--variant lora {COMMON} --rank 384 --base-rank 2 --adaptive-capacity --bias-anchor "
+    ("n3-lora-8L512d-cobars-bR2-r384",
+     f"--variant lora {COMMON} --rank 384 --base-rank 2 --adaptive-capacity --bias-anchor --rslora "
      f"--alpha-curriculum-until 10000 --edge-curve-points 9 "
      f"--gate-attention --gate-embedding --n-layer 8 --n-head 8 --n-embd 512"),
 
-    ("n3-lora-8L512d-coba-bR8-r256",
-     f"--variant lora {COMMON} --rank 256 --base-rank 8 --adaptive-capacity --bias-anchor "
+    ("n3-lora-8L512d-cobars-bR8-r256",
+     f"--variant lora {COMMON} --rank 256 --base-rank 8 --adaptive-capacity --bias-anchor --rslora "
      f"--alpha-curriculum-until 10000 --edge-curve-points 9 "
      f"--gate-attention --gate-embedding --n-layer 8 --n-head 8 --n-embd 512"),
 
-    ("n3-lora-8L512d-coba-bR24-r192",
-     f"--variant lora {COMMON} --rank 192 --base-rank 24 --adaptive-capacity --bias-anchor "
+    ("n3-lora-8L512d-cobars-bR24-r192",
+     f"--variant lora {COMMON} --rank 192 --base-rank 24 --adaptive-capacity --bias-anchor --rslora "
      f"--alpha-curriculum-until 10000 --edge-curve-points 9 "
      f"--gate-attention --gate-embedding --n-layer 8 --n-head 8 --n-embd 512"),
 
-    ("n3-lora-8L512d-coba-bR64-r128",
-     f"--variant lora {COMMON} --rank 128 --base-rank 64 --adaptive-capacity --bias-anchor "
+    ("n3-lora-8L512d-cobars-bR64-r128",
+     f"--variant lora {COMMON} --rank 128 --base-rank 64 --adaptive-capacity --bias-anchor --rslora "
      f"--alpha-curriculum-until 10000 --edge-curve-points 9 "
      f"--gate-attention --gate-embedding --n-layer 8 --n-head 8 --n-embd 512"),
 
-    ("n3-lora-8L512d-coba-bR128-r96",
-     f"--variant lora {COMMON} --rank 96 --base-rank 128 --adaptive-capacity --bias-anchor "
+    ("n3-lora-8L512d-cobars-bR128-r96",
+     f"--variant lora {COMMON} --rank 96 --base-rank 128 --adaptive-capacity --bias-anchor --rslora "
      f"--alpha-curriculum-until 10000 --edge-curve-points 9 "
      f"--gate-attention --gate-embedding --n-layer 8 --n-head 8 --n-embd 512"),
 
-    ("n3-lora-8L512d-coba-bR256-r64",
-     f"--variant lora {COMMON} --rank 64 --base-rank 256 --adaptive-capacity --bias-anchor "
+    ("n3-lora-8L512d-cobars-bR256-r64",
+     f"--variant lora {COMMON} --rank 64 --base-rank 256 --adaptive-capacity --bias-anchor --rslora "
      f"--alpha-curriculum-until 10000 --edge-curve-points 9 "
      f"--gate-attention --gate-embedding --n-layer 8 --n-head 8 --n-embd 512"),
 
-    ("n3-lora-8L512d-coba-bRfull-r32",
-     f"--variant lora {COMMON} --rank 32 --base-rank -1 --adaptive-capacity --bias-anchor "
+    ("n3-lora-8L512d-cobars-bRfull-r32",
+     f"--variant lora {COMMON} --rank 32 --base-rank -1 --adaptive-capacity --bias-anchor --rslora "
      f"--alpha-curriculum-until 10000 --edge-curve-points 9 "
      f"--gate-attention --gate-embedding --n-layer 8 --n-head 8 --n-embd 512"),
+
+    # ============================================================================
+    # PHASE 4.6: HYBRID — subtle hypernet on the base + LoRA cohort deltas (2026-06-10)
+    #
+    # The hybrid mechanism: W_eff(α) = W_shared * hypernet_gate(α) + Σ α_c·(U_c V_cᵀ).
+    # A SUBTLE per-cohort hypernet (d_embed=4, hypernet rank=8) multiplicatively
+    # modulates the FULL shared base; LoRA deltas add per-cohort capacity on top.
+    # Hybrid has no base_rank (its base is the full hypernet-gated weight), so the
+    # sweep axis is the LoRA cohort rank, on a fixed subtle-hypernet base.
+    #
+    # ALL the recent upgrades carried in: rsLoRA (just ported into the hybrid path —
+    # was unscaled, same high-rank stall), corners-only, bias-anchor, full gating,
+    # train+val matrices, middle readout, samples. Light warmstart + anchor keep the
+    # hypernet gentle (gate starts ~identity). vs the cobars (pure-LoRA) spectrum:
+    # does a subtle cohort-conditioned base modulation beat LoRA-on-a-plain-base?
+    # ============================================================================
+
+    *[(f"n3-hyb-8L512d-co-r{lr}",
+       f"--variant hybrid {COMMON} --d-embed 4 --rank 8 --hybrid-lora-rank {lr} "
+       f"--init uniform --lambda-anchor 0.01 --warmstart-iters 200 --bias-anchor --rslora "
+       f"--alpha-curriculum-until 10000 --edge-curve-points 9 "
+       f"--gate-attention --gate-embedding --n-layer 8 --n-head 8 --n-embd 512")
+      for lr in (16, 32, 64, 96, 128, 192, 256, 384)],
 ]
 
 

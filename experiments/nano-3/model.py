@@ -96,7 +96,7 @@ def make_linear(cfg, in_features, out_features, gated):
                                    hypernet_d_embed=cfg.d_embed,
                                    hypernet_rank=cfg.rank,
                                    lora_rank=cfg.hybrid_lora_rank,
-                                   bias=cfg.bias)
+                                   bias=cfg.bias, rslora=cfg.rslora)
     raise ValueError(f"unknown variant: {cfg.variant}")
 
 
@@ -491,7 +491,8 @@ class LoRAAdditiveEmbedding(nn.Module):
 # ---------------------------------------------------------------------------
 class HybridGatedLinear(nn.Module):
     def __init__(self, in_features, out_features, n_cohorts,
-                  hypernet_d_embed=8, hypernet_rank=16, lora_rank=64, bias=False):
+                  hypernet_d_embed=8, hypernet_rank=16, lora_rank=64, bias=False,
+                  rslora=False):
         super().__init__()
         self.in_features = in_features
         self.out_features = out_features
@@ -507,13 +508,16 @@ class HybridGatedLinear(nn.Module):
         self.U = nn.Parameter(torch.empty(n_cohorts, out_features, lora_rank))
         self.V = nn.Parameter(torch.zeros(n_cohorts, in_features, lora_rank))
         nn.init.normal_(self.U, std=0.02)
+        # rsLoRA: scale the delta by 1/sqrt(lora_rank) so high-rank deltas don't
+        # stall (the same fix proven on the lora variant).
+        self.rslora_scale = 1.0 / math.sqrt(lora_rank) if rslora else 1.0
 
     def forward(self, x, alpha, cohort_embeddings):
         # Hypernet multiplicative gate (same math as HypernetGatedLinear)
         e_alpha = alpha @ cohort_embeddings
         gate = self.hypernet(e_alpha)
-        # LoRA additive delta
-        delta = torch.einsum('c,cor,cir->oi', alpha, self.U, self.V)
+        # LoRA additive delta (rsLoRA-scaled)
+        delta = torch.einsum('c,cor,cir->oi', alpha, self.U, self.V) * self.rslora_scale
         # Combined: gated base + LoRA delta
         W_eff = self.weight * gate + delta
         return F.linear(x, W_eff, self.bias)
@@ -526,12 +530,12 @@ class HybridFFN(nn.Module):
                                           hypernet_d_embed=cfg.d_embed,
                                           hypernet_rank=cfg.rank,
                                           lora_rank=cfg.hybrid_lora_rank,
-                                          bias=cfg.bias)
+                                          bias=cfg.bias, rslora=cfg.rslora)
         self.c_proj = HybridGatedLinear(4 * cfg.n_embd, cfg.n_embd, cfg.n_cohorts,
                                             hypernet_d_embed=cfg.d_embed,
                                             hypernet_rank=cfg.rank,
                                             lora_rank=cfg.hybrid_lora_rank,
-                                            bias=cfg.bias)
+                                            bias=cfg.bias, rslora=cfg.rslora)
         self.dropout = nn.Dropout(cfg.dropout)
 
     def forward(self, x, alpha, cohort_embeddings):
@@ -543,7 +547,7 @@ class HybridGatedEmbedding(nn.Module):
     """Hybrid embedding for tied wte/lm_head: hypernet gate + LoRA delta on the
     shared embedding matrix."""
     def __init__(self, vocab_size, n_embd, n_cohorts, hypernet_d_embed=8,
-                  hypernet_rank=16, lora_rank=64):
+                  hypernet_rank=16, lora_rank=64, rslora=False):
         super().__init__()
         self.vocab_size = vocab_size
         self.n_embd = n_embd
@@ -557,11 +561,12 @@ class HybridGatedEmbedding(nn.Module):
         self.U = nn.Parameter(torch.empty(n_cohorts, vocab_size, lora_rank))
         self.V = nn.Parameter(torch.zeros(n_cohorts, n_embd, lora_rank))
         nn.init.normal_(self.U, std=0.02)
+        self.rslora_scale = 1.0 / math.sqrt(lora_rank) if rslora else 1.0
 
     def _W_eff(self, alpha, cohort_embeddings):
         e_alpha = alpha @ cohort_embeddings
         gate = self.hypernet(e_alpha)
-        delta = torch.einsum('c,cor,cir->oi', alpha, self.U, self.V)
+        delta = torch.einsum('c,cor,cir->oi', alpha, self.U, self.V) * self.rslora_scale
         return self.weight * gate + delta
 
     def embed(self, idx, alpha, cohort_embeddings):
@@ -661,7 +666,8 @@ class NanoGPT(nn.Module):
                 self.gated_embed = HybridGatedEmbedding(cfg.vocab_size, cfg.n_embd, cfg.n_cohorts,
                                                           hypernet_d_embed=cfg.d_embed,
                                                           hypernet_rank=cfg.rank,
-                                                          lora_rank=cfg.hybrid_lora_rank)
+                                                          lora_rank=cfg.hybrid_lora_rank,
+                                                          rslora=cfg.rslora)
             else:
                 raise ValueError(f"gate_embedding=True with unsupported variant {cfg.variant}")
             self.wte = None  # not used; gated_embed.embed/project replace it
