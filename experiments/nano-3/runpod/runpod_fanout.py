@@ -837,6 +837,25 @@ SWEEP_DEFAULT = [
      f"--rank 32 --base-rank 64 --adaptive-capacity --bias-anchor --rslora "
      f"--alpha-curriculum-until 10000 --edge-curve-points 5 "
      f"--gate-attention --gate-embedding --n-layer 8 --n-head 8 --n-embd 512"),
+
+    # ============================================================================
+    # PHASE 4.8: COHORT-COUNT SCALING N=10..100, EVAL-ONLY-AT-END (2026-06-11)
+    #
+    # The N×N corner matrix (train+val) costs O(N^2 * eval_iters) per eval — at N=20
+    # that's ~73 min/eval, which dominated the N=10/20 runs. So eval ONCE at the end:
+    # --eval-interval 100000 (> n_iters → periodic block fires only on the last step)
+    # and --edge-curve-points 0 (edge curves are N-choose-2 pairs, catastrophic at
+    # high N). eval-iters cut 200->40. Winning recipe otherwise (base_rank 64,
+    # corners-only, bias-anchor, rsLoRA, full gating); cohort rank scaled down with N
+    # to hold params ~42-58M on the 24GB card. 100-source data via --max-cohorts.
+    # ============================================================================
+    *[(f"n{N}-scale-bR64-r{rk}",
+       f"--variant lora {COMMON} --data-dir data/100_sources_char --max-cohorts {N} "
+       f"--rank {rk} --base-rank 64 --adaptive-capacity --bias-anchor --rslora "
+       f"--alpha-curriculum-until 10000 --no-eval "
+       f"--gate-attention --gate-embedding --n-layer 8 --n-head 8 --n-embd 512")
+      for N, rk in [(10, 64), (20, 32), (30, 24), (40, 16), (50, 16),
+                    (60, 12), (70, 8), (80, 8), (90, 8), (100, 8)]],
 ]
 
 

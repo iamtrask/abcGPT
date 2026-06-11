@@ -668,7 +668,7 @@ def train_run(args):
                   flush=True)
             t_log = time.time()
 
-        if (it + 1) % args.eval_interval == 0 or (it + 1) == args.n_iters:
+        if (not args.no_eval) and ((it + 1) % args.eval_interval == 0 or (it + 1) == args.n_iters):
             corners = {}        # held-out val loss at each (α-corner, eval-cohort)
             corners_train = {}  # train loss at the same points — to watch overfitting
             for c_alpha, name_alpha in enumerate(cohort_names):
@@ -712,49 +712,47 @@ def train_run(args):
                     print(f"      α={corner:<5} {kind}[{psrc:<5}] -> {show}", flush=True)
             emit({"type": "samples", "iter": it + 1, "samples": samples})
 
-    # ---- Final eval: full N×N corner table + edge curves ----
-    print("\n--- final N×N corner table ---")
+    # ---- Final eval: full N×N corner table + edge curves (skipped with --no-eval) ----
+    # At large N the N×N corner sweep (and the N-choose-2 edge curves) dominate, so
+    # --no-eval skips ALL post-training eval — the run just trains and saves model.pt
+    # (+ an empty-corners summary so the pod still self-terminates and uploads).
     final_corners = {}
     final_corners_train = {}
-    for c_alpha, name_alpha in enumerate(cohort_names):
-        alpha_oh = np.zeros(n_cohorts, dtype=np.float32); alpha_oh[c_alpha] = 1.0
-        for c_eval, name_eval in enumerate(cohort_names):
-            key = f"{name_alpha}@val_{name_eval}"
-            final_corners[key] = eval_at(alpha_oh, name_eval, "val")
-            final_corners_train[key] = eval_at(alpha_oh, name_eval, "train")
-    emit({"type": "corner_table", "iter": args.n_iters,
-          "corners": final_corners,
-          "corners_train": final_corners_train})
-
-    for tag, tbl in (("val", final_corners), ("train", final_corners_train)):
-        print(f"\n  final corner-{tag}-loss table")
-        print(f"{'':>14}" + "".join(f"  α={c:>10s}" for c in cohort_names))
-        for c_eval in cohort_names:
-            row = f"  {tag}={c_eval:>8s}    "
-            for c_alpha in cohort_names:
-                row += f"  {tbl[f'{c_alpha}@val_{c_eval}']:>10.4f}"
-            print(row)
-
-    # Edge curves: for each pair (i, j), sweep α between them with the others at 0.
-    # 5 points per edge (αi from 1 → 0 by 0.25). Useful to see whether the slider
-    # transitions monotonically between corners.
-    print("\n--- edge curves ---")
-    if args.edge_curve_points >= 2:
-        edges = []
-        N = args.edge_curve_points
-        for i in range(n_cohorts):
-            for j in range(i + 1, n_cohorts):
-                for t_idx in range(N):
-                    t = t_idx / (N - 1)
-                    alpha_np = np.zeros(n_cohorts, dtype=np.float32)
-                    alpha_np[i] = 1.0 - t
-                    alpha_np[j] = t
-                    vals = {c: eval_at(alpha_np, c) for c in cohort_names}
-                    edges.append({"edge": (cohort_names[i], cohort_names[j]),
-                                  "t": t, "alpha": alpha_np.tolist(), "vals": vals})
-                    print(f"  edge {cohort_names[i]}→{cohort_names[j]} t={t:.2f}: "
-                          + " ".join(f"{c}={v:.3f}" for c, v in vals.items()), flush=True)
-        emit({"type": "edge_curve", "iter": args.n_iters, "points": edges})
+    if args.no_eval:
+        print("\n--- --no-eval: skipping final corner table + edge curves ---")
+    else:
+        print("\n--- final N×N corner table ---")
+        for c_alpha, name_alpha in enumerate(cohort_names):
+            alpha_oh = np.zeros(n_cohorts, dtype=np.float32); alpha_oh[c_alpha] = 1.0
+            for c_eval, name_eval in enumerate(cohort_names):
+                key = f"{name_alpha}@val_{name_eval}"
+                final_corners[key] = eval_at(alpha_oh, name_eval, "val")
+                final_corners_train[key] = eval_at(alpha_oh, name_eval, "train")
+        emit({"type": "corner_table", "iter": args.n_iters,
+              "corners": final_corners,
+              "corners_train": final_corners_train})
+        for tag, tbl in (("val", final_corners), ("train", final_corners_train)):
+            print(f"\n  final corner-{tag}-loss table")
+            print(f"{'':>14}" + "".join(f"  α={c:>10s}" for c in cohort_names))
+            for c_eval in cohort_names:
+                row = f"  {tag}={c_eval:>8s}    "
+                for c_alpha in cohort_names:
+                    row += f"  {tbl[f'{c_alpha}@val_{c_eval}']:>10.4f}"
+                print(row)
+        if args.edge_curve_points >= 2:
+            edges = []
+            N = args.edge_curve_points
+            for i in range(n_cohorts):
+                for j in range(i + 1, n_cohorts):
+                    for t_idx in range(N):
+                        t = t_idx / (N - 1)
+                        alpha_np = np.zeros(n_cohorts, dtype=np.float32)
+                        alpha_np[i] = 1.0 - t
+                        alpha_np[j] = t
+                        vals = {c: eval_at(alpha_np, c) for c in cohort_names}
+                        edges.append({"edge": (cohort_names[i], cohort_names[j]),
+                                      "t": t, "alpha": alpha_np.tolist(), "vals": vals})
+            emit({"type": "edge_curve", "iter": args.n_iters, "points": edges})
 
     emit({"type": "done", "iter": args.n_iters,
           "total_s": time.time() - t0,
@@ -899,6 +897,11 @@ def main():
     p.add_argument("--eval-interval", type=int, default=500)
     p.add_argument("--eval-iters", type=int, default=200)
     p.add_argument("--edge-curve-points", type=int, default=5)
+    p.add_argument("--no-eval", action="store_true",
+                   help="Skip ALL eval (periodic + final corner table + edge curves + "
+                        "samples). Just train and save model.pt (+ empty-corners "
+                        "summary so the pod self-terminates). For high-N runs where "
+                        "the N×N corner sweep is the bottleneck.")
     p.add_argument("--single-cohort", default="none",
                    help="If set to one of cohort_names (e.g. 'shake'), train ONLY on that cohort "
                         "for the full run. Used for per-cohort single-source ceiling baselines.")
