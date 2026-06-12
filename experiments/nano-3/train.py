@@ -243,7 +243,21 @@ def train_run(args):
     meta, cohort_names, bins = load_meta_and_bins(data_dir, max_cohorts=args.max_cohorts)
     n_cohorts = len(cohort_names)
     vocab_size = meta["vocab_size"]
-    stoi, itos = meta["stoi"], meta["itos"]
+    # Tokenizer: char-level (stoi/itos maps in meta) OR GPT-2 BPE (tiktoken).
+    # meta["tokenizer"] == "gpt2" selects BPE; anything else (or absent) = char.
+    # encode/decode abstract over both so gen_sample is tokenizer-agnostic.
+    tokenizer = meta.get("tokenizer", "char")
+    if tokenizer == "gpt2":
+        import tiktoken
+        _bpe = tiktoken.get_encoding("gpt2")
+        stoi = itos = None
+        def encode(s):   return _bpe.encode(s, allowed_special=set())
+        def decode(ids): return _bpe.decode(ids)
+        print(f"tokenizer: gpt2 BPE (tiktoken), vocab {vocab_size}")
+    else:
+        stoi, itos = meta["stoi"], meta["itos"]
+        def encode(s):   return [stoi.get(ch, stoi.get(" ", 0)) for ch in s]
+        def decode(ids): return "".join(itos.get(i, "?") for i in ids)
     # Per-cohort sample prompts (natural-cased; the vocab is full ASCII). Used to
     # generate text at each α-corner every eval — one on-domain prompt for the
     # corner + one off-domain prompt (the next cohort's) to see if the slider
@@ -490,7 +504,7 @@ def train_run(args):
         cuda_state = torch.cuda.get_rng_state() if torch.cuda.is_available() else None
         try:
             model.eval()
-            ids = [stoi.get(ch, stoi.get(" ", 0)) for ch in prompt]
+            ids = encode(prompt)
             x = torch.tensor([ids], dtype=torch.long, device=device)
             alpha = (None if args.variant == "ungated"
                      else torch.tensor(alpha_np, dtype=torch.float32, device=device))
@@ -508,7 +522,7 @@ def train_run(args):
                 x = torch.cat([x, nxt], dim=1)
                 out.append(int(nxt.item()))
             model.train()
-            return "".join(itos.get(i, "?") for i in out)[len(prompt):]
+            return decode(out)[len(prompt):]
         finally:
             torch.random.set_rng_state(cpu_state)
             if cuda_state is not None:
@@ -529,6 +543,7 @@ def train_run(args):
         "n_iters": args.n_iters,
         "lr": args.lr, "warmup": args.warmup, "min_lr": args.min_lr,
         "batch_size": args.batch_size, "block_size": args.block_size,
+        "grad_accum": args.grad_accum, "tokenizer": meta.get("tokenizer", "char"),
         "n_layer": args.n_layer, "n_head": args.n_head, "n_embd": args.n_embd,
         "d_embed": args.d_embed, "rank": args.rank,
         "init": args.init, "lambda_anchor": args.lambda_anchor,
@@ -660,11 +675,19 @@ def train_run(args):
                     loss = loss + args.wrong_corner_lambda * F.relu(
                         args.wrong_corner_margin - L_wrong)
 
-        opt.zero_grad(set_to_none=True)
-        loss.backward()
-        if args.grad_clip > 0:
-            torch.nn.utils.clip_grad_norm_(model.parameters(), args.grad_clip)
-        opt.step()
+        # Gradient accumulation: zero grads only at a window's first micro-step,
+        # step only at its last. --grad-accum 1 (default) reproduces the original
+        # per-step behavior exactly (window size 1). loss/ga so the accumulated
+        # gradient is the MEAN over the ga micro-batches — matching a real batch
+        # ga× larger. Used to reach GPT-2's ~0.5M-token effective batch.
+        ga = max(1, args.grad_accum)
+        if it % ga == 0:
+            opt.zero_grad(set_to_none=True)
+        (loss / ga).backward()
+        if (it % ga == ga - 1) or (it == args.n_iters - 1):
+            if args.grad_clip > 0:
+                torch.nn.utils.clip_grad_norm_(model.parameters(), args.grad_clip)
+            opt.step()
 
         if (it + 1) % args.log_interval == 0:
             dt = time.time() - t_log
@@ -905,6 +928,12 @@ def main():
     p.add_argument("--beta2", type=float, default=0.99)
     p.add_argument("--weight-decay", type=float, default=0.1)
     p.add_argument("--grad-clip", type=float, default=1.0)
+    p.add_argument("--grad-accum", type=int, default=1,
+                   help="Gradient accumulation: micro-batches per optimizer step. "
+                        "1 (default) = original per-step behavior. With G>1 each "
+                        "optimizer update accumulates G micro-batches (loss/G) before "
+                        "stepping — used to reach GPT-2's ~0.5M-token effective batch. "
+                        "n-iters and warmup count micro-steps.")
     p.add_argument("--alpha-curriculum-until", type=int, default=1000,
                    help="iters of one-hot α sampling before switching to Dirichlet(1,1,...)")
     p.add_argument("--init", default="uniform", choices=["uniform", "low_hamming", "singletons"])
