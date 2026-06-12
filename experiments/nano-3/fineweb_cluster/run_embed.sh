@@ -24,8 +24,28 @@ curl -fsSL "$base/embed_domains.py" -o embed_domains.py
 curl -fsSL "$base/cluster_domains_balanced.py" -o cluster_domains_balanced.py
 mkdir -p out
 
+# Background progress-pusher: ship /tmp/embed.log to HF every 240s so the (long)
+# embedding pass is visible mid-run. Clustering still needs the full set; only it
+# truly waits. ~15 commits/hr — well under HF's 128/hr/repo cap.
+push_log() { python - <<'PY' 2>/dev/null
+import os
+from huggingface_hub import HfApi
+api = HfApi(token=os.environ["HF_TOKEN"]); repo = os.environ.get("HF_REPO", "iamtrask/abcGPT-nano-3")
+for src, dst in [("/tmp/embed.log", "fineweb_cluster/embed.log"),
+                 ("out/cluster_preview.json", "fineweb_cluster/cluster_preview.json")]:
+    if os.path.exists(src):
+        try:
+            api.upload_file(path_or_fileobj=src, path_in_repo=dst, repo_id=repo, repo_type="model")
+        except Exception:
+            pass
+PY
+}
+( while true; do sleep 240; push_log; done ) &
+PUSHER_PID=$!
+
 echo "=== STAGE 1: embed domains (N_DOCS=$N_DOCS cap=$CAP) ==="
-python embed_domains.py --n-docs "$N_DOCS" --cap "$CAP" --device cuda --batch 512 --out-dir out
+python embed_domains.py --n-docs "$N_DOCS" --cap "$CAP" --device cuda --batch 512 --out-dir out \
+    --checkpoint-every 1500000 --checkpoint-k "$K"
 
 echo "=== STAGE 2: balanced cluster (K=$K micro=$MICRO) ==="
 python cluster_domains_balanced.py --in-dir out --out-dir out --k "$K" --micro "$MICRO"

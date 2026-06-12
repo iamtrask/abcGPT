@@ -29,6 +29,34 @@ def host_of(url):
     return h[4:] if h.startswith("www.") else h
 
 
+def write_cluster_preview(out_dir, hosts, emb_sum, emb_count, tokens, k, n_seen, dim):
+    """Quick semantic-only k-means on the domains seen SO FAR -> cluster_preview.json
+    (top domains per cluster). For mid-run visibility; token-balancing is the final
+    step, not this. Cheap: MiniBatchKMeans on the growing domain set, ~seconds."""
+    import json
+    from sklearn.cluster import MiniBatchKMeans
+    H = len(hosts)
+    if H < k:
+        return
+    vecs = np.zeros((H, dim), np.float32); tok = np.zeros(H, np.int64)
+    for i, h in enumerate(hosts):
+        c = emb_count[h]; v = emb_sum.get(h)
+        if v is not None and c > 0:
+            v = v / c; nrm = np.linalg.norm(v); vecs[i] = v / nrm if nrm > 0 else v
+        tok[i] = tokens[h]
+    lab = MiniBatchKMeans(n_clusters=k, batch_size=4096, n_init=2, random_state=0).fit_predict(vecs)
+    clusters = {}
+    for c in range(k):
+        idx = np.where(lab == c)[0]
+        if len(idx) == 0:
+            continue
+        top = idx[np.argsort(-tok[idx])][:6]
+        clusters[int(c)] = {"tokens": int(tok[idx].sum()), "n_domains": int(len(idx)),
+                            "top_domains": [str(hosts[i]) for i in top]}
+    json.dump({"n_docs_seen": n_seen, "n_domains": H, "k": k, "clusters": clusters},
+              open(Path(out_dir) / "cluster_preview.json", "w"), indent=1)
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--n-docs", type=int, default=50000, help="0 = all (~14.9M)")
@@ -38,6 +66,9 @@ def main():
     ap.add_argument("--batch", type=int, default=128)
     ap.add_argument("--max-chars", type=int, default=2000, help="truncate doc text before embedding")
     ap.add_argument("--out-dir", default="fineweb_cluster_out")
+    ap.add_argument("--checkpoint-every", type=int, default=0,
+                    help="every N docs, write a quick-k-means cluster_preview.json (0 = off)")
+    ap.add_argument("--checkpoint-k", type=int, default=100)
     args = ap.parse_args()
 
     from datasets import load_dataset
@@ -67,6 +98,7 @@ def main():
                 emb_sum[h] = v.astype(np.float32).copy()
         buf_text.clear(); buf_host.clear()
 
+    Path(args.out_dir).mkdir(parents=True, exist_ok=True)
     n = 0; t0 = time.time()
     for ex in ds:
         url = ex.get("url", "")
@@ -84,6 +116,11 @@ def main():
         n += 1
         if n % 50000 == 0:
             print(f"  {n:,} docs | {len(docs):,} domains | {time.time()-t0:.0f}s", flush=True)
+        if args.checkpoint_every and n % args.checkpoint_every == 0 and len(docs) >= args.checkpoint_k:
+            flush()
+            write_cluster_preview(args.out_dir, list(docs.keys()), emb_sum, emb_count, tokens,
+                                  args.checkpoint_k, n, DIM)
+            print(f"  [checkpoint] cluster_preview.json @ {n:,} docs / {len(docs):,} domains", flush=True)
         if args.n_docs and n >= args.n_docs:
             break
     flush()
