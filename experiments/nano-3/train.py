@@ -562,6 +562,14 @@ def train_run(args):
         "t_start": time.time(),
     })
 
+    # ---- Resume (load weights + iter from a checkpoint, for reclaim recovery) ----
+    start_iter = 0
+    if args.resume_from:
+        ck = torch.load(args.resume_from, map_location=device, weights_only=True)
+        model.load_state_dict(ck["model"], strict=False)
+        start_iter = int(ck.get("iter", 0))
+        print(f"resumed from {args.resume_from} at iter {start_iter}")
+
     # ---- Training loop ----
     t0 = time.time()
     t_log = t0
@@ -586,7 +594,7 @@ def train_run(args):
         print(f"HAT temperature schedule: {args.hat_temp_start} → {args.hat_temp_end} "
               f"linearly over {args.n_iters} iters")
 
-    for it in range(args.n_iters):
+    for it in range(start_iter, args.n_iters):
         cur_lr = apply_lr(it)
 
         # Phase 2.1: HAT temperature anneal (hypernet/hybrid only)
@@ -704,6 +712,10 @@ def train_run(args):
                   f"| {cohort:>5s} | loss {tl:.4f} | lr {cur_lr:.5f} | dt {dt:.1f}s",
                   flush=True)
             t_log = time.time()
+
+        if args.ckpt_every and (it + 1) % args.ckpt_every == 0:
+            torch.save({"model": model.state_dict(), "iter": it + 1}, out_dir / "ckpt.pt")
+            print(f"  [ckpt] saved at iter {it+1}", flush=True)
 
         if (not args.no_eval) and ((it + 1) % args.eval_interval == 0 or (it + 1) == args.n_iters):
             corners = {}        # held-out val loss at each (α-corner, eval-cohort)
@@ -935,6 +947,10 @@ def main():
                         "optimizer update accumulates G micro-batches (loss/G) before "
                         "stepping — used to reach GPT-2's ~0.5M-token effective batch. "
                         "n-iters and warmup count micro-steps.")
+    p.add_argument("--ckpt-every", type=int, default=0,
+                   help="Save ckpt.pt ({model, iter}) every N iters for crash/reclaim recovery (0=off).")
+    p.add_argument("--resume-from", default="",
+                   help="Path to a ckpt.pt to resume model weights + iter counter from.")
     p.add_argument("--alpha-curriculum-until", type=int, default=1000,
                    help="iters of one-hot α sampling before switching to Dirichlet(1,1,...)")
     p.add_argument("--init", default="uniform", choices=["uniform", "low_hamming", "singletons"])
