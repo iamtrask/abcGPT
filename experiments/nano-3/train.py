@@ -604,7 +604,24 @@ def train_run(args):
             set_hat_temperature(model, temp)
 
         # α sampling
-        if single_cohort_idx is not None:
+        if args.commit_frac > 0:
+            # Commit-frac mode: α = commit_frac on the active cluster, the remaining
+            # (1-commit_frac) spread as Dirichlet over the other N-1. Data from the
+            # active cluster. commit_frac=1.0 -> pure one-hot (corners-only).
+            c_idx = int(rng.integers(n_cohorts))
+            alpha_np = np.zeros(n_cohorts, dtype=np.float32)
+            if args.commit_frac >= 1.0:
+                alpha_np[c_idx] = 1.0
+            else:
+                tail = (rng.dirichlet(np.ones(n_cohorts - 1)).astype(np.float32)
+                        * (1.0 - args.commit_frac))
+                ti = 0
+                for k in range(n_cohorts):
+                    if k == c_idx:
+                        alpha_np[k] = args.commit_frac
+                    else:
+                        alpha_np[k] = tail[ti]; ti += 1
+        elif single_cohort_idx is not None:
             # Single-cohort ceiling baseline: only train on this cohort.
             # α one-hot at this cohort so any gated model still gets a defined α.
             c_idx = single_cohort_idx
@@ -953,6 +970,11 @@ def main():
                    help="Path to a ckpt.pt to resume model weights + iter counter from.")
     p.add_argument("--alpha-curriculum-until", type=int, default=1000,
                    help="iters of one-hot α sampling before switching to Dirichlet(1,1,...)")
+    p.add_argument("--commit-frac", type=float, default=0.0,
+                   help="If >0, EVERY step sets α = commit_frac on the active (data) cluster + "
+                        "(1-commit_frac) spread as Dirichlet over the other N-1. 1.0 = pure one-hot "
+                        "(corners-only). 0.98 = mostly-committed with a 2%% interior tail. Overrides "
+                        "the curriculum/Dirichlet α schedule.")
     p.add_argument("--init", default="uniform", choices=["uniform", "low_hamming", "singletons"])
     p.add_argument("--lambda-anchor", type=float, default=0.01)
     p.add_argument("--warmstart-iters", type=int, default=1000)
