@@ -50,9 +50,41 @@ PY
 }
 ( while true; do sleep 300; push; done ) &   # starts BEFORE tokenize -> tokenize visible
 
+get_cache() { python - <<'PY' 2>/dev/null
+import os, sys, tarfile
+from huggingface_hub import hf_hub_download
+try:
+    p = hf_hub_download(os.environ["HF_REPO"], os.environ["CKEY"] + "/bins.tar.gz",
+                        repo_type="model", token=os.environ["HF_TOKEN"])
+    os.makedirs(os.environ["COUT"], exist_ok=True)
+    with tarfile.open(p) as t: t.extractall(os.environ["COUT"])
+    sys.exit(0)
+except Exception: sys.exit(1)
+PY
+}
+put_cache() { python - <<'PY' 2>/dev/null
+import os, glob, tarfile
+from huggingface_hub import HfApi
+api = HfApi(token=os.environ["HF_TOKEN"]); repo = os.environ["HF_REPO"]; key = os.environ["CKEY"]
+if f"{key}/bins.tar.gz" in set(api.list_repo_files(repo)):
+    print("cache already present; skip upload"); raise SystemExit
+with tarfile.open("/tmp/cache.tar.gz", "w:gz") as tar:
+    for f in glob.glob(os.environ["COUT"] + "/*"):
+        tar.add(f, arcname=os.path.basename(f))
+api.upload_file(path_or_fileobj="/tmp/cache.tar.gz", path_in_repo=f"{key}/bins.tar.gz", repo_id=repo, repo_type="model")
+print("uploaded tokenization cache", key)
+PY
+}
+
 if [ ! -f data_clustered/meta.pkl ]; then
-  echo "=== tokenize full corpus -> per-cluster bins (~2.4 hr) ==="
-  python prepare_clustered.py --n-docs "$N_DOCS" --clusters clusters.npz --out-dir data_clustered --k "$K"
+  export CKEY="data_clustered_cache" COUT="data_clustered"
+  if get_cache; then
+    echo "=== downloaded PRE-TOKENIZED per-cluster bins from cache (skipped tokenize) ==="
+  else
+    echo "=== no cache -> tokenize + upload for next time (~2.4 hr) ==="
+    python prepare_clustered.py --n-docs "$N_DOCS" --clusters clusters.npz --out-dir data_clustered --k "$K"
+    put_cache || echo "cache upload failed (non-fatal)"
+  fi
 fi
 
 echo "=== TRAIN $RUN_NAME (K=$K, rank=$RANK, commit_frac=$COMMIT_FRAC) ==="
