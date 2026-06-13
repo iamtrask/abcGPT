@@ -34,12 +34,8 @@ except Exception:
 PY
 RESUME=""; [ -f /workspace/resume.pt ] && RESUME="--resume-from /workspace/resume.pt"
 
-if [ ! -f data_full/meta.pkl ]; then
-  echo "=== tokenize full corpus (~2.4 hr) ==="
-  python prepare_full.py --n-docs "$N_DOCS" --out-dir data_full
-fi
-
-# background: push log + ckpt to HF every 15 min (loss curve visibility + reclaim recovery)
+# background: push log + ckpt to HF every 5 min. STARTS BEFORE tokenize so the long
+# tokenization phase is visible too (not just training).
 push() { python - <<'PY' 2>/dev/null
 import os
 from huggingface_hub import HfApi
@@ -52,7 +48,12 @@ for s, d in [("/tmp/base.log", "baseline_gpt2/base.log"),
         except Exception: pass
 PY
 }
-( while true; do sleep 900; push; done ) &
+( while true; do sleep 300; push; done ) &
+
+if [ ! -f data_full/meta.pkl ]; then
+  echo "=== tokenize full corpus (~2.4 hr) ==="
+  python prepare_full.py --n-docs "$N_DOCS" --out-dir data_full
+fi
 
 echo "=== TRAIN baseline GPT-2 124M (ungated, target val ~3.29) ==="
 python train.py --variant ungated --variant-name baseline-gpt2 --data-dir data_full \

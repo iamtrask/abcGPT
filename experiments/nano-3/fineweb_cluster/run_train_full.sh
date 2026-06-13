@@ -33,11 +33,6 @@ except Exception: print("no resume ckpt -> fresh start")
 PY
 RESUME=""; [ -f /workspace/resume.pt ] && RESUME="--resume-from /workspace/resume.pt"
 
-if [ ! -f data_clustered/meta.pkl ]; then
-  echo "=== tokenize full corpus -> per-cluster bins (~2.4 hr) ==="
-  python prepare_clustered.py --n-docs "$N_DOCS" --clusters clusters.npz --out-dir data_clustered --k "$K"
-fi
-
 push() { python - <<'PY' 2>/dev/null
 import os
 from huggingface_hub import HfApi
@@ -50,7 +45,12 @@ for s, d in [("/tmp/full.log", "slider_gpt2/full.log"),
         except Exception: pass
 PY
 }
-( while true; do sleep 900; push; done ) &
+( while true; do sleep 300; push; done ) &   # starts BEFORE tokenize -> tokenize visible
+
+if [ ! -f data_clustered/meta.pkl ]; then
+  echo "=== tokenize full corpus -> per-cluster bins (~2.4 hr) ==="
+  python prepare_clustered.py --n-docs "$N_DOCS" --clusters clusters.npz --out-dir data_clustered --k "$K"
+fi
 
 echo "=== TRAIN slider GPT-2 124M (K=$K, rank=$RANK, mixed-α) ==="
 python train.py --variant lora --variant-name slider-gpt2 --data-dir data_clustered \
