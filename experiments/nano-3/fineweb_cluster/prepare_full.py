@@ -34,7 +34,7 @@ def main():
             np.array(buf, dtype=np.uint16).tofile(ftrain); buf = []
 
     for ex in ds:
-        ids = enc.encode(ex.get("text", "") or "", allowed_special=set()); ids.append(eot)
+        ids = enc.encode(ex.get("text", "") or "", disallowed_special=()); ids.append(eot)
         n += 1; total += len(ids); i = 0
         if val_done < VAL_TOK:                       # first VAL_TOK tokens -> val
             take = min(VAL_TOK - val_done, len(ids))
