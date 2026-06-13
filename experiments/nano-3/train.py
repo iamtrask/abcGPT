@@ -290,6 +290,7 @@ def train_run(args):
         rslora=args.rslora,
         bias_anchor=args.bias_anchor,
         offload_deltas=args.offload_deltas,
+        reserve_frac=args.reserve_frac,
     )
 
     torch.manual_seed(args.seed)
@@ -975,6 +976,10 @@ def main():
                         "(1-commit_frac) spread as Dirichlet over the other N-1. 1.0 = pure one-hot "
                         "(corners-only). 0.98 = mostly-committed with a 2%% interior tail. Overrides "
                         "the curriculum/Dirichlet α schedule.")
+    p.add_argument("--reserve-frac", type=float, default=0.0,
+                   help="Reserve this fraction of each gated linear's base output neurons for the "
+                        "deltas: gate the base down (first half hard=0, second half soft=0.5) so the "
+                        "per-cohort LoRA has room to imprint. 0 = off. lora variant only.")
     p.add_argument("--init", default="uniform", choices=["uniform", "low_hamming", "singletons"])
     p.add_argument("--lambda-anchor", type=float, default=0.01)
     p.add_argument("--warmstart-iters", type=int, default=1000)

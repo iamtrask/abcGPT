@@ -75,6 +75,10 @@ class NanoGPTConfig:
     # ParameterList kept on CPU; the forward streams only the active cohort(s) to
     # the GPU. Lets us keep full cohort rank at any N without OOM.
     offload_deltas: bool = False
+    # Reserved base capacity for deltas to imprint (0 = off). The last reserve_frac
+    # of each gated linear's output neurons gate the base DOWN (first half hard=0,
+    # second half soft=0.5); per-cohort deltas still write everywhere.
+    reserve_frac: float = 0.0
 
 
 # ---------------------------------------------------------------------------
@@ -96,7 +100,8 @@ def make_linear(cfg, in_features, out_features, gated):
                                     rank=cfg.rank, bias=cfg.bias,
                                     base_rank=cfg.base_rank,
                                     adaptive_capacity=cfg.adaptive_capacity,
-                                    rslora=cfg.rslora, offload=cfg.offload_deltas)
+                                    rslora=cfg.rslora, offload=cfg.offload_deltas,
+                                    reserve_frac=cfg.reserve_frac)
     if cfg.variant == "hybrid":
         return HybridGatedLinear(in_features, out_features, cfg.n_cohorts,
                                    hypernet_d_embed=cfg.d_embed,
@@ -348,7 +353,8 @@ class LoRAAdditiveLinear(nn.Module):
     """
 
     def __init__(self, in_features, out_features, n_cohorts, rank=16, bias=False,
-                  base_rank=-1, adaptive_capacity=False, rslora=False, offload=False):
+                  base_rank=-1, adaptive_capacity=False, rslora=False, offload=False,
+                  reserve_frac=0.0):
         super().__init__()
         self.in_features = in_features
         self.out_features = out_features
@@ -396,10 +402,28 @@ class LoRAAdditiveLinear(nn.Module):
             # Base scaling factor in log-space (init=0 → scale=1.0)
             self.base_log_cap = nn.Parameter(torch.zeros(1))
 
+        # Reserved capacity (fixed, non-learned): gate the base DOWN in the last
+        # reserve_frac of output neurons so per-cohort deltas have room to imprint.
+        # Split: first half HARD (g=0, base zeroed -> pure delta), second half SOFT
+        # (g=0.5, base+delta coexist). reserve_frac=0 -> no gate (no-op).
+        self.reserve_frac = reserve_frac
+        if reserve_frac and reserve_frac > 0:
+            g = torch.ones(out_features)
+            n_res = int(round(reserve_frac * out_features))
+            n_hard = n_res // 2
+            n_soft = n_res - n_hard
+            if n_res > 0:
+                g[out_features - n_res: out_features - n_soft] = 0.0   # hard half
+                g[out_features - n_soft: out_features] = 0.5            # soft half
+            self.register_buffer("base_gate", g)
+        else:
+            self.base_gate = None
+
     def _W_shared(self):
-        if self.base_rank > 0:
-            return self.base_A @ self.base_B.T
-        return self.weight
+        W = self.base_A @ self.base_B.T if self.base_rank > 0 else self.weight
+        if getattr(self, "base_gate", None) is not None:
+            W = W * self.base_gate.unsqueeze(1)   # gate base per output neuron
+        return W
 
     def forward(self, x, alpha):
         if self.offload:
@@ -451,12 +475,14 @@ class LoRAAdditiveFFN(nn.Module):
                                           rank=cfg.rank, bias=cfg.bias,
                                           base_rank=cfg.base_rank,
                                           adaptive_capacity=cfg.adaptive_capacity,
-                                          rslora=cfg.rslora, offload=cfg.offload_deltas)
+                                          rslora=cfg.rslora, offload=cfg.offload_deltas,
+                                    reserve_frac=cfg.reserve_frac)
         self.c_proj = LoRAAdditiveLinear(4 * cfg.n_embd, cfg.n_embd, cfg.n_cohorts,
                                             rank=cfg.rank, bias=cfg.bias,
                                             base_rank=cfg.base_rank,
                                             adaptive_capacity=cfg.adaptive_capacity,
-                                            rslora=cfg.rslora, offload=cfg.offload_deltas)
+                                            rslora=cfg.rslora, offload=cfg.offload_deltas,
+                                    reserve_frac=cfg.reserve_frac)
         self.dropout = nn.Dropout(cfg.dropout)
 
     def forward(self, x, alpha, cohort_embeddings=None):
