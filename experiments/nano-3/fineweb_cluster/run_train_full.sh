@@ -13,6 +13,10 @@ BRANCH="${BRANCH:-fineweb-cluster}"
 N_DOCS="${N_DOCS:-0}"; K="${K:-100}"
 BATCH="${BATCH:-8}"; GA="${GA:-64}"; NITERS="${NITERS:-1220000}"; WARMUP="${WARMUP:-44000}"; RANK="${RANK:-16}"
 COMMIT_FRAC="${COMMIT_FRAC:-0}"
+# base_rank: -1 = FULL base (a real GPT-2 backbone, deltas ride on top); >0 = low-rank A@B^T.
+BASE_RANK="${BASE_RANK:-64}"
+# offload: stream only the active cohort's delta to GPU (frees ~3.8GB at commit-100 -> bigger batch).
+OFFLOAD_FLAG=""; [ -n "${OFFLOAD:-}" ] && OFFLOAD_FLAG="--offload-deltas"
 echo "RUN_NAME=$RUN_NAME  COMMIT_FRAC=$COMMIT_FRAC"
 
 cd /workspace
@@ -87,12 +91,12 @@ if [ ! -f data_clustered/meta.pkl ]; then
   fi
 fi
 
-echo "=== TRAIN $RUN_NAME (K=$K, rank=$RANK, commit_frac=$COMMIT_FRAC) ==="
+echo "=== TRAIN $RUN_NAME (K=$K, rank=$RANK, base_rank=$BASE_RANK, offload=${OFFLOAD:-0}, commit_frac=$COMMIT_FRAC) ==="
 python train.py --variant lora --variant-name "$RUN_NAME" --data-dir data_clustered \
   --n-layer 12 --n-head 12 --n-embd 768 --block-size 1024 --dropout 0.0 \
   --batch-size "$BATCH" --grad-accum "$GA" --n-iters "$NITERS" --warmup "$WARMUP" \
   --lr 6e-4 --min-lr 6e-5 --beta2 0.95 --weight-decay 0.1 --grad-clip 1.0 \
-  --rank "$RANK" --base-rank 64 --adaptive-capacity --bias-anchor --rslora \
+  --rank "$RANK" --base-rank "$BASE_RANK" $OFFLOAD_FLAG --adaptive-capacity --bias-anchor --rslora \
   --gate-attention --gate-embedding --commit-frac "$COMMIT_FRAC" --alpha-curriculum-until 0 \
   --no-eval --log-interval 500 --ckpt-every 30000 \
   --device cuda --amp-dtype bfloat16 --results-root /workspace/results $RESUME || echo "TRAIN_FAILED"
