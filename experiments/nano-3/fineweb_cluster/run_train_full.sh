@@ -11,6 +11,11 @@ export HF_REPO="${HF_REPO:-iamtrask/abcGPT-nano-3}"
 export RUN_NAME="${RUN_NAME:-slider-gpt2}"
 BRANCH="${BRANCH:-fineweb-cluster}"
 N_DOCS="${N_DOCS:-0}"; K="${K:-100}"
+# K-general: which cluster file / data dir / cache key this run uses (so K=1000 etc.
+# don't collide with the K=100 artifacts). Defaults reproduce the original K=100 run.
+export CLUSTERS_HF="${CLUSTERS_HF:-fineweb_cluster/clusters.npz}"
+export DATA_DIR="${DATA_DIR:-data_clustered}"
+export CKEY="${CKEY:-data_clustered_cache}"
 BATCH="${BATCH:-8}"; GA="${GA:-64}"; NITERS="${NITERS:-1220000}"; WARMUP="${WARMUP:-44000}"; RANK="${RANK:-16}"
 COMMIT_FRAC="${COMMIT_FRAC:-0}"
 # base_rank: -1 = FULL base (a real GPT-2 backbone, deltas ride on top); >0 = low-rank A@B^T.
@@ -30,17 +35,45 @@ base="https://raw.githubusercontent.com/iamtrask/abcGPT/${BRANCH}/experiments/na
 curl -fsSL "$base/fineweb_cluster/prepare_clustered.py" -o prepare_clustered.py
 curl -fsSL "$base/model.py" -o model.py
 curl -fsSL "$base/train.py" -o train.py
+rm -f /workspace/NEED_CLUSTER
 python - <<'PY'
 import os, shutil
 from huggingface_hub import hf_hub_download
-p = hf_hub_download(os.environ["HF_REPO"], "fineweb_cluster/clusters.npz", repo_type="model", token=os.environ["HF_TOKEN"])
-shutil.copy(p, "clusters.npz"); print("got clusters.npz")
+try:
+    p = hf_hub_download(os.environ["HF_REPO"], os.environ["CLUSTERS_HF"], repo_type="model", token=os.environ["HF_TOKEN"])
+    shutil.copy(p, "clusters.npz"); print("got clusters.npz <-", os.environ["CLUSTERS_HF"])
+except Exception:
+    print("no precomputed", os.environ["CLUSTERS_HF"], "-> will cluster domains into K=" + os.environ["K"])
+    open("/workspace/NEED_CLUSTER", "w").close()
 try:
     r = hf_hub_download(os.environ["HF_REPO"], f"{os.environ['RUN_NAME']}/ckpt.pt", repo_type="model", token=os.environ["HF_TOKEN"])
     shutil.copy(r, "/workspace/resume.pt"); print("found resume ckpt")
 except Exception: print("no resume ckpt -> fresh start")
 PY
 RESUME=""; [ -f /workspace/resume.pt ] && RESUME="--resume-from /workspace/resume.pt"
+
+# One-time on-the-fly clustering when this K has no precomputed cluster file yet.
+if [ -f /workspace/NEED_CLUSTER ]; then
+  echo "=== clustering 4.46M domains -> K=$K balanced buckets (one-time, ~20-40 min) ==="
+  pip install -q scikit-learn
+  curl -fsSL "$base/fineweb_cluster/cluster_domains_balanced.py" -o cluster_domains_balanced.py
+  mkdir -p clusterin
+  python - <<'PY'
+import os, shutil
+from huggingface_hub import hf_hub_download
+p = hf_hub_download(os.environ["HF_REPO"], "fineweb_cluster/domains.npz", repo_type="model", token=os.environ["HF_TOKEN"])
+shutil.copy(p, "clusterin/domains.npz"); print("got domains.npz")
+PY
+  python cluster_domains_balanced.py --in-dir clusterin --out-dir clusterin --k "$K"
+  cp clusterin/clusters.npz clusters.npz
+  python - <<'PY'
+import os
+from huggingface_hub import HfApi
+HfApi(token=os.environ["HF_TOKEN"]).upload_file(path_or_fileobj="clusters.npz",
+    path_in_repo=os.environ["CLUSTERS_HF"], repo_id=os.environ["HF_REPO"], repo_type="model")
+print("uploaded", os.environ["CLUSTERS_HF"])
+PY
+fi
 
 push() { python - <<'PY' 2>/dev/null
 import os
@@ -82,19 +115,19 @@ print("uploaded tokenization cache", key)
 PY
 }
 
-if [ ! -f data_clustered/meta.pkl ]; then
-  export CKEY="data_clustered_cache" COUT="data_clustered"
+if [ ! -f "$DATA_DIR/meta.pkl" ]; then
+  export COUT="$DATA_DIR"
   if get_cache; then
     echo "=== downloaded PRE-TOKENIZED per-cluster bins from cache (skipped tokenize) ==="
   else
     echo "=== no cache -> tokenize + upload for next time (~2.4 hr) ==="
-    python prepare_clustered.py --n-docs "$N_DOCS" --clusters clusters.npz --out-dir data_clustered --k "$K"
+    python prepare_clustered.py --n-docs "$N_DOCS" --clusters clusters.npz --out-dir "$DATA_DIR" --k "$K"
     put_cache || echo "cache upload failed (non-fatal)"
   fi
 fi
 
 echo "=== TRAIN $RUN_NAME (K=$K, rank=$RANK, base_rank=$BASE_RANK, offload=${OFFLOAD:-0}, reserve_frac=$RESERVE_FRAC, commit_frac=$COMMIT_FRAC) ==="
-python train.py --variant lora --variant-name "$RUN_NAME" --data-dir data_clustered \
+python train.py --variant lora --variant-name "$RUN_NAME" --data-dir "$DATA_DIR" \
   --n-layer 12 --n-head 12 --n-embd 768 --block-size 1024 --dropout 0.0 \
   --batch-size "$BATCH" --grad-accum "$GA" --n-iters "$NITERS" --warmup "$WARMUP" \
   --lr 6e-4 --min-lr 6e-5 --beta2 0.95 --weight-decay 0.1 --grad-clip 1.0 \
