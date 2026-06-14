@@ -566,9 +566,15 @@ def train_run(args):
     # ---- Resume (load weights + iter from a checkpoint, for reclaim recovery) ----
     start_iter = 0
     if args.resume_from:
-        ck = torch.load(args.resume_from, map_location=device, weights_only=True)
+        # Load on CPU (not device): map_location=device puts a full ~1.7GB copy of
+        # the weights on the GPU that lingers in `ck` and OOMs the backward pass on
+        # resume. load_state_dict copies CPU->GPU into the model; then drop ck.
+        ck = torch.load(args.resume_from, map_location="cpu", weights_only=True)
         model.load_state_dict(ck["model"], strict=False)
         start_iter = int(ck.get("iter", 0))
+        del ck
+        if device == "cuda":
+            torch.cuda.empty_cache()
         print(f"resumed from {args.resume_from} at iter {start_iter}")
 
     # ---- Training loop ----
