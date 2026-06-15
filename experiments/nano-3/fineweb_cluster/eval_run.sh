@@ -24,6 +24,7 @@ export VARIANT="${VARIANT:?need VARIANT (ungated|lora)}"
 export HF_REPO="${HF_REPO:-iamtrask/abcGPT-nano-3}"
 BRANCH="${BRANCH:-fineweb-cluster}"
 export RESERVE_FRAC="${RESERVE_FRAC:-0}"
+export RANK="${RANK:-16}"
 export K="${K:-100}"
 export DATA_CKEY="${DATA_CKEY:-data_clustered_cache}"
 export CKPT_HF="${CKPT_HF:-$RUN_NAME/ckpt.pt}"
@@ -86,7 +87,7 @@ PY
 echo "=== EVAL ($VARIANT, K=$K, eval_iters=$EVAL_ITERS, sample_offdiag=$SAMPLE_OFFDIAG) ==="
 python eval_corners.py \
   --data-dir "$DATA_DIR" --ckpt /workspace/ckpt.pt --variant "$VARIANT" \
-  --reserve-frac "$RESERVE_FRAC" --k "$K" \
+  --reserve-frac "$RESERVE_FRAC" --rank "$RANK" --k "$K" \
   --eval-iters "$EVAL_ITERS" --sample-offdiag "$SAMPLE_OFFDIAG" \
   --out /workspace/corner_metrics.json || echo "EVAL_FAILED"
 

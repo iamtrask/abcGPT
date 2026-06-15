@@ -50,7 +50,7 @@ from model import NanoGPT, NanoGPTConfig, LoRAAdditiveLinear  # noqa: E402
 from train import load_meta_and_bins, make_batch_fn  # noqa: E402
 
 
-def build_model(variant, n_cohorts, reserve_frac, vocab_size, device):
+def build_model(variant, n_cohorts, reserve_frac, vocab_size, device, rank=16):
     """Build the model with the verified-known-good config for each variant.
 
     Returns (model, cfg). The lora build uses offload_deltas=True so the per-cohort
@@ -69,7 +69,7 @@ def build_model(variant, n_cohorts, reserve_frac, vocab_size, device):
             n_layer=12, n_head=12, n_embd=768,
             block_size=1024, vocab_size=vocab_size,
             n_cohorts=n_cohorts, cohort_names=cohort_names,
-            rank=16, base_rank=-1,
+            rank=rank, base_rank=-1,
             adaptive_capacity=True, bias_anchor=True, rslora=True,
             gate_attention=True, gate_embedding=True,
             offload_deltas=True, reserve_frac=reserve_frac,
@@ -123,6 +123,7 @@ def main():
     p.add_argument("--ckpt", required=True, help="Path to ckpt.pt (or model.pt)")
     p.add_argument("--variant", required=True, choices=["ungated", "lora"])
     p.add_argument("--reserve-frac", type=float, default=0.0)
+    p.add_argument("--rank", type=int, default=16, help="LoRA rank (must match the checkpoint)")
     p.add_argument("--k", type=int, default=100, help="Number of cohorts to evaluate")
     p.add_argument("--eval-iters", type=int, default=80,
                    help="Val batches averaged per (alpha, cohort) eval point")
@@ -154,7 +155,7 @@ def main():
     bf = {c: {"val": make_batch_fn(bins[c]["val"], args.block_size, args.batch_size, device)}
           for c in cohort_names}
 
-    model, cfg = build_model(args.variant, n_cohorts, args.reserve_frac, vocab_size, device)
+    model, cfg = build_model(args.variant, n_cohorts, args.reserve_frac, vocab_size, device, args.rank)
     ckpt_iter, strict_used = load_ckpt(model, args.ckpt, device)
     model.eval()
 
