@@ -16,6 +16,9 @@ N_DOCS="${N_DOCS:-0}"; K="${K:-100}"
 export CLUSTERS_HF="${CLUSTERS_HF:-fineweb_cluster/clusters.npz}"
 export DATA_DIR="${DATA_DIR:-data_clustered}"
 export CKEY="${CKEY:-data_clustered_cache}"
+# micro-clusters must be >> K for the bin-packer to balance (FineWeb token skew is
+# brutal). 20x K reproduces the K=100 run (micro=2000) and scales up.
+MICRO="${MICRO:-$((20 * K))}"
 BATCH="${BATCH:-8}"; GA="${GA:-64}"; NITERS="${NITERS:-1220000}"; WARMUP="${WARMUP:-44000}"; RANK="${RANK:-16}"
 COMMIT_FRAC="${COMMIT_FRAC:-0}"
 # base_rank: -1 = FULL base (a real GPT-2 backbone, deltas ride on top); >0 = low-rank A@B^T.
@@ -64,7 +67,7 @@ from huggingface_hub import hf_hub_download
 p = hf_hub_download(os.environ["HF_REPO"], "fineweb_cluster/domains.npz", repo_type="model", token=os.environ["HF_TOKEN"])
 shutil.copy(p, "clusterin/domains.npz"); print("got domains.npz")
 PY
-  python cluster_domains_balanced.py --in-dir clusterin --out-dir clusterin --k "$K"
+  python cluster_domains_balanced.py --in-dir clusterin --out-dir clusterin --k "$K" --micro "$MICRO"
   cp clusterin/clusters.npz clusters.npz
   python - <<'PY'
 import os
