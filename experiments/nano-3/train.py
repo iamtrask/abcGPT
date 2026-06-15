@@ -309,6 +309,11 @@ def train_run(args):
                 for p in list(mod.U) + list(mod.V):
                     p.data = p.data.cpu()
                     n_off += 1
+        # model.to(device) materialized ALL deltas on GPU before we moved them to CPU;
+        # without this the freed blocks stay reserved by the caching allocator (~13GB
+        # at K=1000) and the forward OOMs regardless of batch size. Release them.
+        if device == "cuda":
+            torch.cuda.empty_cache()
         print(f"offload-deltas: {n_off} per-cohort delta params held on CPU")
     n_params = model.num_params()
     print(f"variant: {args.variant}  |  name: {args.variant_name}  |  log: {log_path}")

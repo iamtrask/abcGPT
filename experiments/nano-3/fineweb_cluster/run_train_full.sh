@@ -6,6 +6,14 @@
 set -uo pipefail
 exec > >(tee -a /tmp/full.log) 2>&1
 echo "=== gpt2-124M SLIDER full run $(date) ==="
+# load_meta_and_bins memmaps 2*K bin files at once; at K>=512 that blows past the
+# default ulimit -n (1024) -> "OSError: [Errno 24] Too many open files". Raise the
+# fd limit to a CAPPED 65536 (>> the 20k needed at K=10000). Do NOT raise to ~1M:
+# a huge fd table before CUDA init triggers "CUDA unknown error" (CUDA walks the
+# table on init). 65536 clears our needs with margin and is safe for CUDA.
+ulimit -Hn 65536 2>/dev/null || true
+ulimit -n 65536 2>/dev/null || true
+echo "ulimit -n = $(ulimit -n)"
 : "${HF_TOKEN:?need HF_TOKEN}"
 export HF_REPO="${HF_REPO:-iamtrask/abcGPT-nano-3}"
 export RUN_NAME="${RUN_NAME:-slider-gpt2}"
